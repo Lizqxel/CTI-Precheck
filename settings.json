@@ -1,0 +1,10 @@
+{
+  "browser_settings": {
+    "headless": false,
+    "show_popup": true,
+    "auto_close": false,
+    "page_load_timeout": 60,
+    "script_timeout": 60,
+    "enable_screenshots": true
+  }
+}
