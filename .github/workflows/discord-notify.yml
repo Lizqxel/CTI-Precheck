@@ -14,38 +14,38 @@ jobs:
       - name: Decide message
         id: msg
         run: |
-          echo "CONTENT=" >> $GITHUB_OUTPUT
+          REPO="${{ github.repository }}"
+          EVENT="${{ github.event_name }}"
 
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "$EVENT" = "push" ]; then
             COMMIT_MSG="${{ github.event.head_commit.message }}"
             AUTHOR="${{ github.actor }}"
             BRANCH="${{ github.ref_name }}"
             URL="${{ github.event.head_commit.url }}"
-            echo "CONTENT=✅ **Push to \`${BRANCH}\`** by **${AUTHOR}**\n${COMMIT_MSG}\n${URL}" >> $GITHUB_OUTPUT
+            echo "CONTENT=📦 **${REPO}**\n✅ **Push to \`${BRANCH}\`** by **${AUTHOR}**\n${COMMIT_MSG}\n${URL}" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.action }}" = "opened" ]; then
+          if [ "$EVENT" = "pull_request" ] && [ "${{ github.event.action }}" = "opened" ]; then
             TITLE="${{ github.event.pull_request.title }}"
             AUTHOR="${{ github.actor }}"
             URL="${{ github.event.pull_request.html_url }}"
             BASE="${{ github.event.pull_request.base.ref }}"
             HEAD="${{ github.event.pull_request.head.ref }}"
-            echo "CONTENT=🆕 **PR Opened** by **${AUTHOR}**\n**${TITLE}**\n\`${HEAD}\` → \`${BASE}\`\n${URL}" >> $GITHUB_OUTPUT
+            echo "CONTENT=📦 **${REPO}**\n🆕 **PR Opened** by **${AUTHOR}**\n**${TITLE}**\n\`${HEAD}\` → \`${BASE}\`\n${URL}" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.action }}" = "closed" ] && [ "${{ github.event.pull_request.merged }}" = "true" ]; then
+          if [ "$EVENT" = "pull_request" ] && [ "${{ github.event.action }}" = "closed" ] && [ "${{ github.event.pull_request.merged }}" = "true" ]; then
             TITLE="${{ github.event.pull_request.title }}"
             AUTHOR="${{ github.actor }}"
             URL="${{ github.event.pull_request.html_url }}"
             BASE="${{ github.event.pull_request.base.ref }}"
             HEAD="${{ github.event.pull_request.head.ref }}"
-            echo "CONTENT=🎉 **PR Merged** by **${AUTHOR}**\n**${TITLE}**\n\`${HEAD}\` → \`${BASE}\`\n${URL}" >> $GITHUB_OUTPUT
+            echo "CONTENT=📦 **${REPO}**\n🎉 **PR Merged** by **${AUTHOR}**\n**${TITLE}**\n\`${HEAD}\` → \`${BASE}\`\n${URL}" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # PR closed but not merged -> do nothing
           echo "CONTENT=" >> $GITHUB_OUTPUT
 
       - name: Send to Discord
