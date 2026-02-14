@@ -6,7 +6,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from services.area_search import clear_cancel_flag as clear_cancel_flag_west
 from services.area_search import search_service_area
@@ -63,6 +63,7 @@ def _validate_rows(rows: List[List[str]]) -> Tuple[List[Dict[str, str]], List[in
                 "住所": normalized_address,
                 "状態": status,
                 "判定結果": "未実行",
+                "備考": "",
             }
         )
 
@@ -79,6 +80,13 @@ def _read_csv(file_path: Path) -> List[List[str]]:
 def _map_result(result: Dict[str, object]) -> str:
     status = str(result.get("status", "")).lower()
     message = str(result.get("message", ""))
+    details = result.get("details") if isinstance(result.get("details"), dict) else {}
+    note = str(details.get("備考", "")) if isinstance(details, dict) else ""
+    area_text = str(details.get("提供エリア", "")) if isinstance(details, dict) else ""
+
+    if "要手動再検索" in message or "調査" in message or "調査" in note or "調査" in area_text:
+        return "要調査"
+
     if status == "available":
         return "提供可能"
     if status == "unavailable":
@@ -90,11 +98,27 @@ def _map_result(result: Dict[str, object]) -> str:
     return "失敗"
 
 
+def _extract_note(result: Dict[str, object]) -> str:
+    search_notes = result.get("search_notes")
+    if isinstance(search_notes, list):
+        merged = " / ".join(str(item).strip() for item in search_notes if str(item).strip())
+        if merged:
+            return merged
+
+    details = result.get("details")
+    if isinstance(details, dict):
+        note = str(details.get("備考", "")).strip()
+        if note:
+            return note
+
+    return ""
+
+
 class DesktopApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("提供判定CSVツール（デスクトップ版）")
-        self.root.geometry("1160x760")
+        self.root.geometry("1320x760")
 
         self.rows_data: List[Dict[str, str]] = []
         self.event_queue: queue.Queue[Tuple[str, object]] = queue.Queue()
@@ -108,7 +132,9 @@ class DesktopApp:
         self.progress_label = tk.StringVar(value="進捗: -")
         self.monitor_browser_var = tk.BooleanVar(value=False)
         self.show_popup_var = tk.BooleanVar(value=True)
-        self.enable_screenshots_var = tk.BooleanVar(value=True)
+        self.run_scope_var = tk.StringVar(value="全行")
+        self.target_line_var = tk.StringVar(value="対象行: 未選択")
+        self.execution_target_line: Optional[int] = None
 
         self._load_settings_to_ui()
         self._build_ui()
@@ -124,6 +150,20 @@ class DesktopApp:
         self.start_button = ttk.Button(top_frame, text="提供判定開始", command=self.start_judgement)
         self.start_button.pack(side=tk.LEFT, padx=(8, 0))
 
+        self.scope_combo = ttk.Combobox(
+            top_frame,
+            textvariable=self.run_scope_var,
+            values=["全行", "選択行のみ", "選択行以降"],
+            state="readonly",
+            width=14,
+        )
+        self.scope_combo.pack(side=tk.LEFT, padx=(12, 0))
+
+        self.set_target_button = ttk.Button(top_frame, text="選択行を対象にセット", command=self.set_target_from_selection)
+        self.set_target_button.pack(side=tk.LEFT, padx=(8, 0))
+
+        ttk.Label(top_frame, textvariable=self.target_line_var).pack(side=tk.LEFT, padx=(8, 0))
+
         self.stop_button = ttk.Button(top_frame, text="停止", command=self.stop_judgement, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
 
@@ -137,7 +177,6 @@ class DesktopApp:
 
         ttk.Checkbutton(setting_frame, text="ブラウザ表示で監視する", variable=self.monitor_browser_var).pack(side=tk.LEFT)
         ttk.Checkbutton(setting_frame, text="判定結果ポップアップを有効化", variable=self.show_popup_var).pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Checkbutton(setting_frame, text="スクリーンショット保存", variable=self.enable_screenshots_var).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Button(setting_frame, text="設定保存", command=self.save_settings).pack(side=tk.LEFT, padx=(16, 0))
 
         info_frame = ttk.Frame(self.root, padding=(12, 0, 12, 8))
@@ -148,22 +187,46 @@ class DesktopApp:
 
         table_frame = ttk.Frame(self.root)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
 
-        columns = ("行", "郵便番号", "住所", "状態", "判定結果")
+        columns = ("行", "郵便番号", "住所", "状態", "判定結果", "備考")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=20)
         for col in columns:
             self.tree.heading(col, text=col)
 
-        self.tree.column("行", width=70, anchor=tk.CENTER)
-        self.tree.column("郵便番号", width=130, anchor=tk.CENTER)
-        self.tree.column("住所", width=560, anchor=tk.W)
-        self.tree.column("状態", width=140, anchor=tk.CENTER)
-        self.tree.column("判定結果", width=140, anchor=tk.CENTER)
+        self._tree_column_layout = {
+            "行": {"ratio": 0.06, "min": 50, "max": 90, "anchor": tk.CENTER},
+            "郵便番号": {"ratio": 0.11, "min": 90, "max": 150, "anchor": tk.CENTER},
+            "住所": {"ratio": 0.36, "min": 220, "max": 640, "anchor": tk.W},
+            "状態": {"ratio": 0.11, "min": 90, "max": 180, "anchor": tk.CENTER},
+            "判定結果": {"ratio": 0.12, "min": 100, "max": 180, "anchor": tk.CENTER},
+            "備考": {"ratio": 0.24, "min": 180, "max": 640, "anchor": tk.W},
+        }
+        self._configure_tree_columns(1320)
+        self.tree.bind("<Configure>", self._on_tree_configure)
 
         scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.LEFT, fill=tk.Y)
+        h_scrollbar = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=h_scrollbar.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        h_scrollbar.grid(row=1, column=0, sticky="ew")
+
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
+
+        self._bind_tree_scroll()
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_selection)
+
+        note_frame = ttk.LabelFrame(self.root, text="備考詳細", padding=8)
+        note_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 8))
+
+        self.note_text = tk.Text(note_frame, height=4, wrap=tk.WORD)
+        note_scroll = ttk.Scrollbar(note_frame, orient=tk.VERTICAL, command=self.note_text.yview)
+        self.note_text.configure(yscrollcommand=note_scroll.set)
+        self.note_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        note_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.note_text.configure(state=tk.DISABLED)
 
         log_frame = ttk.LabelFrame(self.root, text="監視ログ", padding=8)
         log_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 12))
@@ -171,6 +234,51 @@ class DesktopApp:
         self.log_text = tk.Text(log_frame, height=8, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
         self.log_text.configure(state=tk.DISABLED)
+
+    def _bind_tree_scroll(self) -> None:
+        def on_mousewheel(event: tk.Event) -> str:
+            delta = int(event.delta / 120) if event.delta else 0
+            if delta == 0:
+                return "break"
+
+            if event.state & 0x0001:  # Shift押下時は横スクロール
+                self.tree.xview_scroll(-delta * 6, "units")
+            else:
+                self.tree.yview_scroll(-delta * 4, "units")
+            return "break"
+
+        self.tree.bind("<MouseWheel>", on_mousewheel)
+
+    def _on_tree_configure(self, event: tk.Event) -> None:
+        width = int(getattr(event, "width", 0) or 0)
+        if width > 0:
+            self._configure_tree_columns(width)
+
+    def _configure_tree_columns(self, total_width: int) -> None:
+        visible_width = max(total_width - 8, 360)
+        logical_width = max(visible_width + 220, 1100)
+        preferred: Dict[str, int] = {}
+
+        for col, conf in self._tree_column_layout.items():
+            width = int(logical_width * float(conf["ratio"]))
+            width = max(int(conf["min"]), min(int(conf["max"]), width))
+            preferred[col] = width
+
+        adjusted_total = sum(preferred.values())
+        if adjusted_total < logical_width:
+            preferred["備考"] += logical_width - adjusted_total
+
+        # 右端で文字が切れないよう、スクロール終端に余白を追加
+        preferred["備考"] += 120
+
+        for col, conf in self._tree_column_layout.items():
+            self.tree.column(
+                col,
+                width=preferred[col],
+                minwidth=40,
+                anchor=conf["anchor"],
+                stretch=False,
+            )
 
     def _load_settings_to_ui(self) -> None:
         if not SETTINGS_PATH.exists():
@@ -180,7 +288,6 @@ class DesktopApp:
             browser_settings = settings.get("browser_settings", {})
             self.monitor_browser_var.set(not browser_settings.get("headless", True))
             self.show_popup_var.set(browser_settings.get("show_popup", True))
-            self.enable_screenshots_var.set(browser_settings.get("enable_screenshots", True))
         except Exception:
             pass
 
@@ -189,10 +296,9 @@ class DesktopApp:
             "browser_settings": {
                 "headless": not self.monitor_browser_var.get(),
                 "show_popup": self.show_popup_var.get(),
-                "auto_close": False,
+                "auto_close": True,
                 "page_load_timeout": 60,
                 "script_timeout": 60,
-                "enable_screenshots": self.enable_screenshots_var.get(),
             }
         }
 
@@ -235,6 +341,9 @@ class DesktopApp:
         parsed_rows, invalid_line_numbers = _validate_rows(rows)
         self.rows_data = parsed_rows
         self._render_rows(self.rows_data)
+        self.execution_target_line = None
+        self.target_line_var.set("対象行: 未選択")
+        self.run_scope_var.set("全行")
 
         self.total_label.set(f"総行数: {len(self.rows_data)}")
         self.result_label.set("CSV読み込み完了")
@@ -246,6 +355,74 @@ class DesktopApp:
                 f"次の行に入力不備があります: {', '.join(map(str, invalid_line_numbers))}",
             )
 
+    def _resolve_target_lines(self) -> Optional[Set[int]]:
+        scope = self.run_scope_var.get().strip()
+        if scope == "全行":
+            return None
+
+        if self.execution_target_line is None:
+            return set()
+
+        if scope == "選択行のみ":
+            return {self.execution_target_line}
+
+        if scope == "選択行以降":
+            return {
+                int(row["行"])
+                for row in self.rows_data
+                if int(row["行"]) >= self.execution_target_line
+            }
+
+        return None
+
+    def _set_execution_target_line(self, line_number: int) -> None:
+        self.execution_target_line = line_number
+        self.target_line_var.set(f"対象行: {line_number}")
+
+    def set_target_from_selection(self) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("未選択", "テーブルから対象行を選択してください。")
+            return
+
+        try:
+            line_number = int(selected[0])
+        except Exception:
+            messagebox.showwarning("選択エラー", "対象行の取得に失敗しました。")
+            return
+
+        self._set_execution_target_line(line_number)
+        self._append_log(f"対象行を {line_number} に設定しました")
+
+    def _on_tree_double_click(self, event: tk.Event) -> None:
+        if self.running:
+            return
+
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return
+
+        try:
+            line_number = int(row_id)
+        except Exception:
+            return
+
+        self._set_execution_target_line(line_number)
+        choice = messagebox.askyesnocancel(
+            "実行範囲を選択",
+            f"{line_number}行目を選択しました。\n"
+            "[はい] この行だけ実行\n"
+            "[いいえ] この行以降を実行\n"
+            "[キャンセル] 対象設定のみ",
+        )
+
+        if choice is True:
+            self.run_scope_var.set("選択行のみ")
+            self.start_judgement()
+        elif choice is False:
+            self.run_scope_var.set("選択行以降")
+            self.start_judgement()
+
     def start_judgement(self) -> None:
         if self.running:
             return
@@ -253,15 +430,22 @@ class DesktopApp:
             messagebox.showwarning("未読み込み", "先にCSVファイルを選択してください。")
             return
 
+        target_lines = self._resolve_target_lines()
+        if target_lines is not None and len(target_lines) == 0:
+            messagebox.showwarning("対象未設定", "実行対象の行を選択してください。")
+            return
+
+        total_targets = len(self.rows_data) if target_lines is None else len(target_lines)
+
         self.save_settings()
         self.stop_requested = False
         self.running = True
         self._set_running_ui_state(True)
         self.result_label.set("提供判定を実行中...")
-        self.progress_label.set(f"進捗: 0/{len(self.rows_data)}")
+        self.progress_label.set(f"進捗: 0/{total_targets}")
         self._append_log("提供判定を開始しました")
 
-        self.worker_thread = threading.Thread(target=self._run_judgement, daemon=True)
+        self.worker_thread = threading.Thread(target=self._run_judgement, args=(target_lines,), daemon=True)
         self.worker_thread.start()
 
     def stop_judgement(self) -> None:
@@ -281,19 +465,7 @@ class DesktopApp:
             area_search_east.set_cancel_flag(True)
         except Exception:
             pass
-
-        for module in (None, area_search_east):
-            try:
-                driver = None
-                if module is None:
-                    from services import area_search
-                    driver = getattr(area_search, "global_driver", None)
-                else:
-                    driver = getattr(module, "global_driver", None)
-                if driver:
-                    driver.quit()
-            except Exception:
-                pass
+        self._append_log("停止要求: キャンセルフラグを送信しました（ドライバーは処理側で安全停止）")
 
     def _clear_cancel_flags(self) -> None:
         try:
@@ -305,9 +477,10 @@ class DesktopApp:
         except Exception:
             pass
 
-    def _run_judgement(self) -> None:
+    def _run_judgement(self, target_lines: Optional[Set[int]] = None) -> None:
         failed_rows: List[int] = []
         processed = 0
+        total_targets = len(self.rows_data) if target_lines is None else len(target_lines)
 
         self._clear_cancel_flags()
 
@@ -316,12 +489,16 @@ class DesktopApp:
             if self.stop_requested:
                 break
 
+            if target_lines is not None and line_number not in target_lines:
+                continue
+
             if row["状態"] != "OK":
                 row["判定結果"] = "失敗"
+                row["備考"] = f"入力不備: {row['状態']}"
                 failed_rows.append(line_number)
                 processed += 1
                 self.event_queue.put(("row", row.copy()))
-                self.event_queue.put(("progress", (processed, len(self.rows_data))))
+                self.event_queue.put(("progress", (processed, total_targets)))
                 continue
 
             postal_code = row["郵便番号"]
@@ -336,16 +513,18 @@ class DesktopApp:
                 result = search_service_area(postal_code, address, progress_callback=progress_callback)
                 judgement = _map_result(result if isinstance(result, dict) else {})
                 row["判定結果"] = judgement
+                row["備考"] = _extract_note(result if isinstance(result, dict) else {})
                 if judgement == "失敗":
                     failed_rows.append(line_number)
             except Exception as exc:
                 row["判定結果"] = "失敗"
+                row["備考"] = f"実行時エラー: {exc}"
                 failed_rows.append(line_number)
                 self.event_queue.put(("log", f"{line_number}行目: エラー {exc}"))
 
             processed += 1
             self.event_queue.put(("row", row.copy()))
-            self.event_queue.put(("progress", (processed, len(self.rows_data))))
+            self.event_queue.put(("progress", (processed, total_targets)))
 
         cancelled = self.stop_requested
         self.event_queue.put(("done", {"failed_rows": failed_rows, "cancelled": cancelled}))
@@ -397,6 +576,8 @@ class DesktopApp:
         self.select_button.configure(state=tk.DISABLED if is_running else tk.NORMAL)
         self.start_button.configure(state=tk.DISABLED if is_running else tk.NORMAL)
         self.stop_button.configure(state=tk.NORMAL if is_running else tk.DISABLED)
+        self.scope_combo.configure(state=tk.DISABLED if is_running else "readonly")
+        self.set_target_button.configure(state=tk.DISABLED if is_running else tk.NORMAL)
 
     def _append_log(self, message: str) -> None:
         self.log_text.configure(state=tk.NORMAL)
@@ -411,17 +592,47 @@ class DesktopApp:
     def _render_rows(self, rows: List[Dict[str, str]]) -> None:
         self._clear_tree()
         for row in rows:
+            note_full = row.get("備考", "")
+            note_cell = note_full if len(note_full) <= 48 else f"{note_full[:48]}…"
             self.tree.insert(
                 "",
                 tk.END,
                 iid=row["行"],
-                values=(row["行"], row["郵便番号"], row["住所"], row["状態"], row["判定結果"]),
+                values=(row["行"], row["郵便番号"], row["住所"], row["状態"], row["判定結果"], note_cell),
             )
+
+        self._refresh_note_detail()
 
     def _update_row(self, row: Dict[str, str]) -> None:
         row_id = row["行"]
         if self.tree.exists(row_id):
-            self.tree.item(row_id, values=(row["行"], row["郵便番号"], row["住所"], row["状態"], row["判定結果"]))
+            note_full = row.get("備考", "")
+            note_cell = note_full if len(note_full) <= 48 else f"{note_full[:48]}…"
+            self.tree.item(
+                row_id,
+                values=(row["行"], row["郵便番号"], row["住所"], row["状態"], row["判定結果"], note_cell),
+            )
+
+        self._refresh_note_detail()
+
+    def _on_tree_selection(self, event: tk.Event) -> None:
+        self._refresh_note_detail()
+
+    def _refresh_note_detail(self) -> None:
+        selected = self.tree.selection()
+        note = ""
+        if selected:
+            selected_id = selected[0]
+            for row in self.rows_data:
+                if row.get("行") == selected_id:
+                    note = row.get("備考", "")
+                    break
+
+        self.note_text.configure(state=tk.NORMAL)
+        self.note_text.delete("1.0", tk.END)
+        if note:
+            self.note_text.insert(tk.END, note)
+        self.note_text.configure(state=tk.DISABLED)
 
     def save_result_csv(self) -> None:
         if not self.rows_data:
@@ -442,7 +653,8 @@ class DesktopApp:
             writer = csv.writer(f)
             for row in self.rows_data:
                 result_value = row.get("判定結果", "未実行")
-                writer.writerow([row["郵便番号"], row["住所"], result_value])
+                note_value = row.get("備考", "")
+                writer.writerow([row["郵便番号"], row["住所"], result_value, note_value])
 
         self.result_label.set(f"結果CSV保存: {save_path.name}")
         self._append_log(f"結果CSVを保存しました: {save_path}")
