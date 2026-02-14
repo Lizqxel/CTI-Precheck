@@ -37,3 +37,6 @@ Thumbs.db
 # IDE/Editor
 .vscode/
 .idea/
+
+# App settings
+settings.json
