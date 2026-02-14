@@ -21,6 +21,7 @@ import time
 import re
 import os
 import json
+import threading
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -38,9 +39,37 @@ from services.area_search import take_full_page_screenshot, check_cancellation, 
 
 # グローバル変数でブラウザドライバーを保持
 global_driver = None
+_active_drivers = set()
+_active_drivers_lock = threading.Lock()
 
 # キャンセルフラグ
 _global_cancel_flag = False
+
+
+def register_active_driver(driver):
+    if driver is None:
+        return
+    with _active_drivers_lock:
+        _active_drivers.add(driver)
+
+
+def unregister_active_driver(driver):
+    if driver is None:
+        return
+    with _active_drivers_lock:
+        _active_drivers.discard(driver)
+
+
+def close_active_drivers():
+    with _active_drivers_lock:
+        drivers = list(_active_drivers)
+        _active_drivers.clear()
+
+    for driver in drivers:
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 def set_cancel_flag(value=True):
     """キャンセルフラグを設定
@@ -482,6 +511,7 @@ def search_service_area(postal_code, address, progress_callback=None):
         
         # グローバル変数に保存
         global_driver = driver
+        register_active_driver(driver)
          # タイムアウト設定を適用
         driver.set_page_load_timeout(page_load_timeout)
         driver.set_script_timeout(script_timeout)
@@ -664,6 +694,7 @@ def search_service_area(postal_code, address, progress_callback=None):
         if driver and auto_close:
             try:
                 driver.quit()
+                unregister_active_driver(driver)
                 logging.info("ブラウザを終了しました")
             except Exception as e:
                 logging.warning(f"ブラウザの終了中にエラー: {str(e)}") 

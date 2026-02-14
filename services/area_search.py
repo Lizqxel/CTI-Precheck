@@ -21,6 +21,7 @@ import time
 import re
 import os
 import json
+import threading
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -37,6 +38,34 @@ from utils.address_utils import split_address, normalize_address
 # グローバル変数でブラウザドライバーを保持
 global_driver = None
 _global_cancel_flag = False
+_active_drivers = set()
+_active_drivers_lock = threading.Lock()
+
+
+def register_active_driver(driver):
+    if driver is None:
+        return
+    with _active_drivers_lock:
+        _active_drivers.add(driver)
+
+
+def unregister_active_driver(driver):
+    if driver is None:
+        return
+    with _active_drivers_lock:
+        _active_drivers.discard(driver)
+
+
+def close_active_drivers():
+    with _active_drivers_lock:
+        drivers = list(_active_drivers)
+        _active_drivers.clear()
+
+    for driver in drivers:
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 class CancellationError(Exception):
     """検索キャンセル時に発生する例外"""
@@ -872,9 +901,6 @@ def search_service_area_west(postal_code, address, progress_callback=None):
 
         return best_button, best_text
     
-    # キャンセルフラグをリセット
-    clear_cancel_flag()
-    
     # デバッグログ：入力値の確認
     logging.info(f"=== 検索開始 ===")
     logging.info(f"入力郵便番号（変換前）: {postal_code}")
@@ -978,6 +1004,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
         
         # グローバル変数に保存
         global_driver = driver
+        register_active_driver(driver)
         
         # タイムアウト設定適用前にキャンセルチェック
         check_cancellation()
@@ -1527,6 +1554,8 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                             take_screenshot_if_enabled(driver, "debug_banchi_not_found.png")
                             raise ValueError("適切なボタンが見つかりませんでした")
                             
+                    except CancellationError:
+                        raise
                     except Exception as e:
                         logging.error(f"番地選択処理中にエラー: {str(e)}")
                         take_screenshot_if_enabled(driver, "debug_banchi_error.png")
@@ -2127,6 +2156,9 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                         "show_popup": show_popup  # ポップアップ表示設定を追加
                     })
             
+            except CancellationError:
+                logging.info("結果判定中にキャンセルが検出されました")
+                raise
             except Exception as e:
                 logging.error(f"結果の判定中にエラー: {str(e)}")
                 screenshot_path = "debug_result_error.png"
@@ -2185,9 +2217,8 @@ def search_service_area_west(postal_code, address, progress_callback=None):
             })
     
     except CancellationError as e:
-        logging.error(f"自動化に失敗しました: {str(e)}")
-        # キャンセル例外は再発生させて上位で処理
-        raise
+        logging.info(f"提供エリア検索はキャンセルされました: {str(e)}")
+        return finalize_result({"status": "cancelled", "message": "検索がキャンセルされました"})
     except Exception as e:
         logging.error(f"自動化に失敗しました: {str(e)}")
         screenshot_path = "debug_general_error.png"
