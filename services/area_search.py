@@ -158,8 +158,9 @@ def split_address(address):
                 remaining = remaining_address[len(city):].strip()
                 
                 # 甲乙丙丁・イロハを含む番地表記を優先的に抽出
-                symbolic_number_match = re.match(r'^(.*?)([甲乙丙丁])(\d+)([イロハ])?$', remaining)
-                trailing_symbol_match = re.match(r'^(.*?)(\d+)([イロハ])$', remaining)
+                symbolic_number_match = re.match(r'^(.*?)([甲乙丙丁ァ-ヶぁ-ん])(\d+(?:[-－]\d+)?)([ァ-ヶぁ-ん])?$', remaining)
+                trailing_symbol_match = re.match(r'^(.*?)(\d+(?:[-－]\d+)?)(?:[-－]?)([ァ-ヶぁ-ん])$', remaining)
+                prefix_only_match = re.match(r'^(.*?)([甲乙丙丁ァ-ヶぁ-ん])$', remaining)
 
                 if symbolic_number_match:
                     town = symbolic_number_match.group(1).strip()
@@ -170,6 +171,10 @@ def split_address(address):
                     town = trailing_symbol_match.group(1).strip()
                     number_part = trailing_symbol_match.group(2)
                     number_suffix = trailing_symbol_match.group(3)
+                elif prefix_only_match:
+                    town = prefix_only_match.group(1).strip()
+                    number_prefix = prefix_only_match.group(2)
+                    number_part = None
                 else:
                     # 特殊な表記（大字、字、甲乙丙丁）を含む部分を抽出
                     special_location_match = re.search(r'(大字.+?字.*?|大字.*?|字.*?)([甲乙丙丁])?(\d+)', remaining)
@@ -198,9 +203,33 @@ def split_address(address):
                             # ハイフンが2つある場合は、最初の数字を丁目として扱う
                             double_hyphen_match = re.search(r'(\d+)-(\d+)-(\d+)', remaining)
                             if double_hyphen_match:
-                                block = double_hyphen_match.group(1)
-                                number_part = f"{double_hyphen_match.group(2)}-{double_hyphen_match.group(3)}"
-                                town = remaining[:double_hyphen_match.start()].strip()
+                                first_number = double_hyphen_match.group(1)
+                                second_number = double_hyphen_match.group(2)
+                                third_number = double_hyphen_match.group(3)
+                                town_candidate = remaining[:double_hyphen_match.start()].strip()
+
+                                # 先頭数値が基本住所側に含まれている場合のみ「丁目相当」とみなす
+                                # それ以外は 3-1-1 のように番地としてそのまま扱う
+                                first_number_zen = first_number.translate(str.maketrans('0123456789', '０１２３４５６７８９'))
+                                kanji_map = {
+                                    '1': '一', '2': '二', '3': '三', '4': '四', '5': '五',
+                                    '6': '六', '7': '七', '8': '八', '9': '九', '10': '十'
+                                }
+                                first_number_kanji = kanji_map.get(first_number)
+
+                                has_first_in_town = (
+                                    first_number in town_candidate or
+                                    first_number_zen in town_candidate or
+                                    (first_number_kanji is not None and first_number_kanji in town_candidate)
+                                )
+
+                                town = town_candidate
+                                if has_first_in_town:
+                                    block = first_number
+                                    number_part = f"{second_number}-{third_number}"
+                                else:
+                                    block = None
+                                    number_part = f"{first_number}-{second_number}-{third_number}"
                             else:
                                 # 通常の番地パターンを検索
                                 number_match = re.search(r'(\d+(?:[-－]\d+)?)', remaining)
@@ -770,6 +799,8 @@ def search_service_area_west(postal_code, address, progress_callback=None):
     # 番地と号を分離
     street_number = None
     building_number = None
+    selected_banchi_text = None
+    banchi_stage_pending = False
     number_prefix = address_parts.get('number_prefix')
     number_suffix = address_parts.get('number_suffix')
     if address_parts['number']:
@@ -1022,7 +1053,27 @@ def search_service_area_west(postal_code, address, progress_callback=None):
             check_cancellation()
             
             # 住所を選択
-            best_candidate, similarity = find_best_address_match(base_address, valid_candidates)
+            best_candidate = None
+            similarity = -1
+
+            # 接頭語（甲乙丙丁/カナ）がある場合、候補住所側の一致を優先
+            if number_prefix:
+                try:
+                    target_address_with_prefix = normalize_string(f"{base_address}{number_prefix}")
+                    for candidate in valid_candidates:
+                        check_cancellation()
+                        candidate_text = candidate.text.strip().split('\n')[0]
+                        candidate_normalized = normalize_string(candidate_text)
+                        if candidate_normalized == target_address_with_prefix:
+                            best_candidate = candidate
+                            similarity = 1.0
+                            logging.info(f"接頭語付き住所候補を優先選択しました: {candidate_text}")
+                            break
+                except Exception as prefix_match_error:
+                    logging.warning(f"接頭語付き候補の優先判定に失敗: {str(prefix_match_error)}")
+
+            if not best_candidate:
+                best_candidate, similarity = find_best_address_match(base_address, valid_candidates)
             
             if best_candidate:
                 selected_address = best_candidate.text.strip().split('\n')[0]
@@ -1078,38 +1129,82 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 
                 # 番地がない場合は「番地なし」を選択
                 if not street_number:
-                    logging.info("番地が指定されていないため、「（番地なし）」を選択します")
-                    try:
-                        # 「（番地なし）」のリンクを探す
-                        no_address_link = WebDriverWait(driver, 5).until(
-                            EC.element_to_be_clickable((By.XPATH, "//dialog[@id='DIALOG_ID01']//a[contains(text(), '（番地なし）')]"))
-                        )
-                        
-                        # スクロールしてリンクを表示
-                        driver.execute_script("arguments[0].scrollIntoView(true);", no_address_link)
-                        time.sleep(1)
-                        
-                        # クリックを試行（複数の方法）
+                    if number_prefix:
+                        logging.info(f"番地が未指定のため、接頭語「{number_prefix}」を優先して選択します")
                         try:
-                            no_address_link.click()
-                            logging.info("通常のクリックで「（番地なし）」を選択しました")
-                        except Exception as click_error:
-                            logging.warning(f"通常のクリックに失敗: {str(click_error)}")
+                            all_buttons = driver.find_elements(By.XPATH, "//dialog[@id='DIALOG_ID01']//a")
+                            logging.info(f"全ての番地ボタン数: {len(all_buttons)}")
+
+                            prefix_button = None
+                            no_address_button = None
+                            for button in all_buttons:
+                                try:
+                                    check_cancellation()
+                                    button_text = button.text.strip()
+                                    logging.debug(f"番地ボタンのテキスト: {button_text}")
+                                    if button_text == number_prefix and prefix_button is None:
+                                        prefix_button = button
+                                        logging.info(f"番地接頭語ボタンが見つかりました: {button_text}")
+                                    elif button_text == "（番地なし）" and no_address_button is None:
+                                        no_address_button = button
+                                except Exception:
+                                    continue
+
+                            target_button = prefix_button or no_address_button
+                            if not target_button:
+                                raise ValueError("接頭語および番地なしボタンが見つかりませんでした")
+
+                            driver.execute_script("arguments[0].scrollIntoView(true);", target_button)
+                            time.sleep(0.2)
+
                             try:
-                                driver.execute_script("arguments[0].click();", no_address_link)
-                                logging.info("JavaScriptでクリックしました")
-                            except Exception as js_error:
-                                logging.warning(f"JavaScriptクリックに失敗: {str(js_error)}")
-                                ActionChains(driver).move_to_element(no_address_link).click().perform()
-                                logging.info("ActionChainsでクリックしました")
-                        
-                        # クリック後の待機
-                        time.sleep(2)
-                        
-                    except Exception as e:
-                        logging.error(f"「（番地なし）」の選択に失敗: {str(e)}")
-                        driver.save_screenshot("debug_no_address_error.png")
-                        raise
+                                target_button.click()
+                                logging.info("通常のクリックで接頭語/番地なしを選択しました")
+                            except Exception:
+                                driver.execute_script("arguments[0].click();", target_button)
+                                logging.info("JavaScriptで接頭語/番地なしを選択しました")
+
+                            selected_banchi_text = number_prefix if prefix_button else "番地なし"
+                            time.sleep(0.5)
+
+                        except Exception as e:
+                            logging.error(f"接頭語選択に失敗したため番地なしへフォールバック: {str(e)}")
+                            number_prefix = None
+
+                    if not number_prefix or selected_banchi_text != number_prefix:
+                        logging.info("番地が指定されていないため、「（番地なし）」を選択します")
+                        try:
+                            # 「（番地なし）」のリンクを探す
+                            no_address_link = WebDriverWait(driver, 5).until(
+                                EC.element_to_be_clickable((By.XPATH, "//dialog[@id='DIALOG_ID01']//a[contains(text(), '（番地なし）')]"))
+                            )
+                            
+                            # スクロールしてリンクを表示
+                            driver.execute_script("arguments[0].scrollIntoView(true);", no_address_link)
+                            time.sleep(0.2)
+                            
+                            # クリックを試行（複数の方法）
+                            try:
+                                no_address_link.click()
+                                logging.info("通常のクリックで「（番地なし）」を選択しました")
+                            except Exception as click_error:
+                                logging.warning(f"通常のクリックに失敗: {str(click_error)}")
+                                try:
+                                    driver.execute_script("arguments[0].click();", no_address_link)
+                                    logging.info("JavaScriptでクリックしました")
+                                except Exception as js_error:
+                                    logging.warning(f"JavaScriptクリックに失敗: {str(js_error)}")
+                                    ActionChains(driver).move_to_element(no_address_link).click().perform()
+                                    logging.info("ActionChainsでクリックしました")
+                            
+                            # クリック後の待機
+                            time.sleep(0.5)
+                            selected_banchi_text = "番地なし"
+                            
+                        except Exception as e:
+                            logging.error(f"「（番地なし）」の選択に失敗: {str(e)}")
+                            driver.save_screenshot("debug_no_address_error.png")
+                            raise
                 else:
                     # 番地を入力
                     input_street_number = street_number
@@ -1150,6 +1245,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                         
                         # 番地ボタンを探す（優先順位付き）
                         banchi_button = None
+                        banchi_prefix_button = None
                         banchi_nashi_button = None
                         gaitou_nashi_button = None
                         
@@ -1159,7 +1255,11 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                                 check_cancellation()
                                 
                                 button_text = button.text.strip()
-                                logging.info(f"番地ボタンのテキスト: {button_text}")
+                                logging.debug(f"番地ボタンのテキスト: {button_text}")
+
+                                if number_prefix and button_text == number_prefix and banchi_prefix_button is None:
+                                    banchi_prefix_button = button
+                                    logging.info(f"番地接頭語ボタンが見つかりました: {button_text}")
                                 
                                 # 目的の番地を優先的に探す
                                 if button_text in banchi_candidates:
@@ -1181,19 +1281,30 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                                 continue
                         
                         # 優先順位に従ってボタンを選択
-                        if banchi_button:
+                        if number_prefix and street_number and banchi_prefix_button:
+                            target_button = banchi_prefix_button
+                            selected_banchi_text = number_prefix
+                            logging.info(f"接頭語を優先選択: {number_prefix}（接頭語モード）")
+                        elif banchi_button:
                             target_button = banchi_button
                             try:
                                 selected_button_text = target_button.text.strip()
                             except Exception:
                                 selected_button_text = "(取得失敗)"
+                            selected_banchi_text = selected_button_text
                             logging.info(f"番地ボタンを選択: 実際='{selected_button_text}' / 入力番地='{input_street_number}'")
-                        elif banchi_nashi_button:
+                        elif not input_street_number and banchi_nashi_button:
                             target_button = banchi_nashi_button
-                            logging.info("「番地なし」系のボタンを選択")
+                            selected_banchi_text = "番地なし"
+                            logging.info("番地の指定がないため「番地なし」系のボタンを選択")
                         elif gaitou_nashi_button:
                             target_button = gaitou_nashi_button
+                            selected_banchi_text = "該当する住所がない"
                             logging.info("「該当する住所がない」ボタンを選択（フォールバック）")
+                        elif banchi_nashi_button:
+                            target_button = banchi_nashi_button
+                            selected_banchi_text = "番地なし"
+                            logging.info("「該当する住所がない」がないため「番地なし」系を選択（最終フォールバック）")
                         else:
                             target_button = None
                         
@@ -1257,21 +1368,79 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 
             except TimeoutException:
                 logging.info("番地入力画面はスキップされました")
+                # サイト側で番地入力がDIALOG_ID02以降に統合されるケースを考慮
+                if street_number or building_number or number_suffix:
+                    banchi_stage_pending = True
+                    logging.info("番地入力は後続ダイアログで継続します（DIALOG_ID01未表示）")
             
             # 6. 号入力画面が表示された場合は、号を入力
             try:
                 if progress_callback:
                     progress_callback("号を入力中...")
-                
-                # 号入力ダイアログが表示されるまで待機
-                gou_dialog = WebDriverWait(driver, 15).until(
-                    EC.visibility_of_element_located((By.ID, "DIALOG_ID02"))
-                )
-                logging.info("号入力ダイアログが表示されました")
+
+                def get_visible_number_dialog_ids():
+                    ids = []
+                    dialogs = driver.find_elements(By.XPATH, "//dialog[starts-with(@id, 'DIALOG_ID0')]")
+                    for dialog in dialogs:
+                        try:
+                            dialog_id = (dialog.get_attribute("id") or "").strip()
+                            if dialog_id == "DIALOG_ID01":
+                                continue
+                            if dialog.is_displayed():
+                                ids.append(dialog_id)
+                        except Exception:
+                            continue
+                    return ids
+
+                def wait_for_number_dialog(timeout=15, exclude_ids=None):
+                    excluded = set(exclude_ids or [])
+
+                    def _find_visible(_):
+                        dialogs = driver.find_elements(By.XPATH, "//dialog[starts-with(@id, 'DIALOG_ID0')]")
+                        for dialog in dialogs:
+                            try:
+                                dialog_id = (dialog.get_attribute("id") or "").strip()
+                                if dialog_id == "DIALOG_ID01" or dialog_id in excluded:
+                                    continue
+                                if dialog.is_displayed():
+                                    return dialog_id
+                            except Exception:
+                                continue
+                        return False
+
+                    return WebDriverWait(driver, timeout).until(_find_visible)
+
+                # 号入力ダイアログが表示されるまで待機（IDは動的）
+                current_number_dialog_id = wait_for_number_dialog(timeout=15)
+                logging.info(f"号入力ダイアログが表示されました: {current_number_dialog_id}")
                 
                 # 号を入力
                 input_building_number = building_number
+                if not input_building_number and number_suffix:
+                    input_building_number = number_suffix
+                    logging.info(f"接尾文字を号として採用します: {input_building_number}")
                 logging.info(f"入力予定の号: {input_building_number}")
+
+                symbolic_prefix_mode = bool(
+                    number_prefix and selected_banchi_text == number_prefix
+                )
+                has_following_street_step = bool(symbolic_prefix_mode and street_number)
+                has_following_building_step = bool(has_following_street_step and input_building_number)
+                banchi_fallback_mode = bool(banchi_stage_pending and street_number)
+                has_following_building_after_banchi_fallback = bool(banchi_fallback_mode and input_building_number)
+                if symbolic_prefix_mode:
+                    if has_following_building_step:
+                        logging.info(
+                            f"3段階入力モードを有効化: {number_prefix} → {street_number} → {input_building_number}"
+                        )
+                    elif has_following_street_step:
+                        logging.info(
+                            f"2段階入力モードを有効化: {number_prefix} → {street_number}"
+                        )
+                    else:
+                        logging.info(
+                            f"接頭語のみモードを有効化: {number_prefix} → 番地なし"
+                        )
 
                 def add_candidate(candidates, token):
                     if not token:
@@ -1283,91 +1452,102 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                         trans_table_local = str.maketrans(han_numbers_local, zen_numbers_local)
                         candidates.add(token.translate(trans_table_local))
 
-                gou_candidates = set()
-                add_candidate(gou_candidates, input_building_number)
-                add_candidate(gou_candidates, number_suffix)
-                add_candidate(gou_candidates, street_number if (number_prefix or number_suffix) else None)
-                add_candidate(gou_candidates, f"{street_number}{number_suffix}" if street_number and number_suffix else None)
-                logging.info(f"号候補トークン: {sorted(gou_candidates)}")
-                
-                # 全角数字に変換（号がある場合のみ）
-                if input_building_number:
-                    zen_numbers = "０１２３４５６７８９"
-                    han_numbers = "0123456789"
-                    trans_table = str.maketrans(han_numbers, zen_numbers)
-                    zen_building_number = input_building_number.translate(trans_table)
-                    logging.info(f"全角変換後の号: {zen_building_number}")
-                else:
-                    zen_building_number = None
-                    logging.info("号の指定がないため、号なし系のボタンを優先します")
-                
-                # 号ボタンを探す
-                try:
+                def select_from_gou_dialog(target_number, phase_name, dialog_id, prefer_banchi_nashi=False):
+                    local_candidates = set()
+                    add_candidate(local_candidates, target_number)
+                    logging.info(f"{phase_name}候補トークン: {sorted(local_candidates)}")
+
+                    # 全角数字に変換（指定がある場合のみ）
+                    if target_number:
+                        zen_numbers = "０１２３４５６７８９"
+                        han_numbers = "0123456789"
+                        trans_table = str.maketrans(han_numbers, zen_numbers)
+                        zen_target_number = target_number.translate(trans_table)
+                        logging.info(f"{phase_name}の全角変換後: {zen_target_number}")
+                    else:
+                        zen_target_number = None
+                        logging.info(f"{phase_name}の指定がないため、なし系ボタンを優先します")
+
                     # 全ての号ボタンを取得
-                    all_buttons = driver.find_elements(By.XPATH, "//dialog[@id='DIALOG_ID02']//a")
-                    logging.info(f"全ての号ボタン数: {len(all_buttons)}")
-                    
+                    all_buttons = driver.find_elements(By.XPATH, f"//dialog[@id='{dialog_id}']//a")
+                    logging.info(f"全ての号ボタン数({phase_name}, {dialog_id}): {len(all_buttons)}")
+
                     # キャンセルチェック
                     check_cancellation()
-                    
-                    # 号ボタンを探す（優先順位付き）
-                    gou_button = None
-                    gou_candidate_button = None
+
+                    target_button_exact = None
+                    target_button_candidate = None
                     gou_nashi_button = None
-                    banchi_nashi_button = None  # 番地なし系のボタンを追加
+                    banchi_nashi_button = None
+                    gou_empty_button = None
                     gaitou_nashi_button = None
-                    
+
                     for button in all_buttons:
                         try:
                             # キャンセルチェック（ループ内でも確認）
                             check_cancellation()
-                            
+
                             button_text = button.text.strip()
-                            logging.info(f"号ボタンのテキスト: {button_text}")
-                            
-                            # 号の指定がある場合は目的の号を優先的に探す
-                            if button_text in gou_candidates:
-                                gou_candidate_button = button
-                                logging.info(f"号候補ボタンが見つかりました: {button_text}")
-                                if input_building_number and (button_text == input_building_number or button_text == zen_building_number):
-                                    gou_button = button
-                                    logging.info(f"号ボタンが見つかりました: {button_text}")
-                            # 号なし系のボタンを探す
+                            logging.debug(f"号ボタンのテキスト({phase_name}): {button_text}")
+
+                            if button_text in local_candidates:
+                                target_button_candidate = button
+                                logging.info(f"{phase_name}候補ボタンが見つかりました: {button_text}")
+                                if target_number and (button_text == target_number or button_text == zen_target_number):
+                                    target_button_exact = button
+                                    logging.info(f"{phase_name}ボタンが見つかりました: {button_text}")
+                            elif not button_text and gou_empty_button is None:
+                                gou_empty_button = button
+                                logging.info(f"空テキストの号ボタンを検出しました（{phase_name}なし候補）")
                             elif button_text == "（号なし）" or button_text == "号なし":
                                 gou_nashi_button = button
                                 logging.info(f"「{button_text}」ボタンが見つかりました")
-                            # 番地なし系のボタンを探す（号選択画面でも使われることがある）
                             elif button_text == "（番地なし）" or button_text == "番地なし":
                                 banchi_nashi_button = button
                                 logging.info(f"「{button_text}」ボタンが見つかりました")
-                            # 該当する住所がないボタンを探す（最後の手段）
                             elif button_text == "該当する住所がない":
                                 gaitou_nashi_button = button
                                 logging.info(f"「{button_text}」ボタンが見つかりました")
                         except CancellationError:
-                            # キャンセル例外は再発生
                             raise
                         except Exception as e:
                             logging.warning(f"ボタンテキストの取得中にエラー: {str(e)}")
                             continue
-                    
+
                     # 優先順位に従ってボタンを選択
-                    # 号の指定がない場合は号なし系を優先
-                    if gou_button:
-                        target_button = gou_button
-                        logging.info(f"目的の号ボタンを選択: {input_building_number}")
-                    elif gou_candidate_button:
-                        target_button = gou_candidate_button
-                        logging.info("号候補トークンに一致したボタンを選択")
-                    elif not input_building_number and gou_nashi_button:
-                        target_button = gou_nashi_button
-                        logging.info("号の指定がないため「号なし」系ボタンを選択")
-                    elif not input_building_number and banchi_nashi_button:
+                    if target_button_exact:
+                        target_button = target_button_exact
+                        logging.info(f"目的の{phase_name}ボタンを選択: {target_number}")
+                    elif target_button_candidate:
+                        target_button = target_button_candidate
+                        logging.info(f"{phase_name}候補トークンに一致したボタンを選択")
+                    elif target_number and prefer_banchi_nashi and banchi_nashi_button:
                         target_button = banchi_nashi_button
-                        logging.info("号の指定がないため「番地なし」系ボタンを選択")
+                        logging.info(f"指定した{phase_name}が見つからないため「番地なし」系ボタンを選択（フォールバック）")
+                    elif target_number and prefer_banchi_nashi and gou_empty_button:
+                        target_button = gou_empty_button
+                        logging.info(f"指定した{phase_name}が見つからないため空テキストの号ボタンを選択（フォールバック）")
+                    elif target_number and gaitou_nashi_button:
+                        target_button = gaitou_nashi_button
+                        logging.info(f"指定した{phase_name}が見つからないため「該当する住所がない」ボタンを選択（フォールバック）")
+                    elif not target_number and prefer_banchi_nashi and banchi_nashi_button:
+                        target_button = banchi_nashi_button
+                        logging.info(f"{phase_name}の指定がないため「番地なし」系ボタンを選択")
+                    elif not target_number and gou_nashi_button:
+                        target_button = gou_nashi_button
+                        logging.info(f"{phase_name}の指定がないため「号なし」系ボタンを選択")
+                    elif not target_number and gou_empty_button:
+                        target_button = gou_empty_button
+                        logging.info(f"{phase_name}の指定がないため空テキストの号ボタンを選択")
+                    elif not target_number and banchi_nashi_button:
+                        target_button = banchi_nashi_button
+                        logging.info(f"{phase_name}の指定がないため「番地なし」系ボタンを選択")
                     elif gou_nashi_button:
                         target_button = gou_nashi_button
-                        logging.info("「号なし」系のボタンを選択（フォールバック）")
+                        logging.info(f"指定した{phase_name}が見つからないため「号なし」系ボタンを選択（フォールバック）")
+                    elif gou_empty_button:
+                        target_button = gou_empty_button
+                        logging.info(f"指定した{phase_name}が見つからないため空テキストの号ボタンを選択（フォールバック）")
                     elif banchi_nashi_button:
                         target_button = banchi_nashi_button
                         logging.info("「番地なし」系のボタンを選択（フォールバック）")
@@ -1376,54 +1556,99 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                         logging.info("「該当する住所がない」ボタンを選択（最終フォールバック）")
                     else:
                         target_button = None
-                    
-                    if target_button:
-                        try:
-                            # キャンセルチェック（スクロール前）
-                            check_cancellation()
-                            
-                            # スクロールしてボタンを表示
-                            driver.execute_script("arguments[0].scrollIntoView(true);", target_button)
-                            
-                            # キャンセルチェック（待機前）
-                            check_cancellation()
-                            
-                            time.sleep(1)
-                            
-                            # キャンセルチェック（クリック前）
-                            check_cancellation()
-                            
-                            # クリックを試行（複数の方法）
-                            try:
-                                target_button.click()
-                                logging.info("通常のクリックで選択しました")
-                            except Exception as click_error:
-                                # キャンセルチェック（リトライ前）
-                                check_cancellation()
-                                logging.warning(f"通常のクリックに失敗: {str(click_error)}")
-                                try:
-                                    driver.execute_script("arguments[0].click();", target_button)
-                                    logging.info("JavaScriptでクリックしました")
-                                except Exception as js_error:
-                                    # キャンセルチェック（最終リトライ前）
-                                    check_cancellation()
-                                    logging.warning(f"JavaScriptクリックに失敗: {str(js_error)}")
-                                    ActionChains(driver).move_to_element(target_button).click().perform()
-                                    logging.info("ActionChainsでクリックしました")
-                        
-                            # キャンセルチェック（待機前）
-                            check_cancellation()
-                            
-                            # クリック後の待機
-                            time.sleep(2)
-                            
-                        except Exception as e:
-                            logging.error(f"ボタンのクリックに失敗: {str(e)}")
-                            raise
-                    else:
-                        logging.error("適切なボタンが見つかりませんでした")
+
+                    if not target_button:
+                        logging.error(f"適切なボタンが見つかりませんでした: {phase_name}")
                         driver.save_screenshot("debug_gou_not_found.png")
                         raise ValueError("適切なボタンが見つかりませんでした")
+
+                    # クリック実行
+                    try:
+                        # キャンセルチェック（スクロール前）
+                        check_cancellation()
+
+                        # スクロールしてボタンを表示
+                        driver.execute_script("arguments[0].scrollIntoView(true);", target_button)
+
+                        # キャンセルチェック（待機前）
+                        check_cancellation()
+
+                        time.sleep(1)
+
+                        # キャンセルチェック（クリック前）
+                        check_cancellation()
+
+                        try:
+                            target_button.click()
+                            logging.info(f"通常のクリックで選択しました（{phase_name}）")
+                        except Exception as click_error:
+                            check_cancellation()
+                            logging.warning(f"通常のクリックに失敗: {str(click_error)}")
+                            try:
+                                driver.execute_script("arguments[0].click();", target_button)
+                                logging.info(f"JavaScriptでクリックしました（{phase_name}）")
+                            except Exception as js_error:
+                                check_cancellation()
+                                logging.warning(f"JavaScriptクリックに失敗: {str(js_error)}")
+                                ActionChains(driver).move_to_element(target_button).click().perform()
+                                logging.info(f"ActionChainsでクリックしました（{phase_name}）")
+
+                        check_cancellation()
+                        time.sleep(2)
+                    except Exception as e:
+                        logging.error(f"ボタンのクリックに失敗: {str(e)}")
+                        raise
+
+                # 号選択（接頭語あり住所の3段階入力をサポート）
+                try:
+                    if symbolic_prefix_mode:
+                        if has_following_street_step:
+                            # 2段目: 739 などの番地を選択
+                            select_from_gou_dialog(
+                                street_number,
+                                "接頭語後の番地",
+                                current_number_dialog_id,
+                                prefer_banchi_nashi=not has_following_building_step
+                            )
+
+                            # 3段目（必要な場合のみ）: 号
+                            if has_following_building_step:
+                                try:
+                                    next_number_dialog_id = wait_for_number_dialog(timeout=8, exclude_ids={current_number_dialog_id})
+                                    logging.info(f"3段階入力の最終ステップ（号）へ進みます: {next_number_dialog_id}")
+                                    select_from_gou_dialog(input_building_number, "号", next_number_dialog_id)
+                                except TimeoutException:
+                                    logging.warning("接頭語後の番地選択後に号ダイアログが表示されませんでした")
+                            else:
+                                # 接頭語 + 番地のみ（例: ロ108）の場合でも、
+                                # 最終ステップで「番地なし」系を確定させる
+                                try:
+                                    next_number_dialog_id = wait_for_number_dialog(timeout=8)
+                                    logging.info(f"接頭語後の番地選択後の最終ステップへ進みます: {next_number_dialog_id}")
+                                    select_from_gou_dialog(None, "号なし確定", next_number_dialog_id, prefer_banchi_nashi=True)
+                                except TimeoutException:
+                                    logging.info("接頭語後の番地選択で入力完了（号ステップなし）")
+                        else:
+                            # 接頭語のみ（例: 御供田町ホ）の場合
+                            select_from_gou_dialog(None, "号なし確定", current_number_dialog_id, prefer_banchi_nashi=True)
+                    elif banchi_fallback_mode:
+                        logging.info("DIALOG_ID01未表示のため、後続ダイアログで番地処理を代替実行します")
+                        select_from_gou_dialog(
+                            street_number,
+                            "番地(代替)",
+                            current_number_dialog_id,
+                            prefer_banchi_nashi=not has_following_building_after_banchi_fallback
+                        )
+
+                        if has_following_building_after_banchi_fallback:
+                            try:
+                                next_number_dialog_id = wait_for_number_dialog(timeout=8, exclude_ids={current_number_dialog_id})
+                                logging.info(f"番地(代替)選択後の号ステップへ進みます: {next_number_dialog_id}")
+                                select_from_gou_dialog(input_building_number, "号", next_number_dialog_id)
+                            except TimeoutException:
+                                logging.warning("番地(代替)選択後に号ダイアログが表示されませんでした")
+                    else:
+                        select_from_gou_dialog(input_building_number, "号", current_number_dialog_id)
                         
                 except Exception as e:
                     logging.error(f"号選択処理中にエラー: {str(e)}")
@@ -1434,9 +1659,9 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 # 号入力後の読み込みを待つ
                 try:
                     WebDriverWait(driver, 10).until(
-                        EC.invisibility_of_element_located((By.ID, "DIALOG_ID02"))
+                        lambda _: len(get_visible_number_dialog_ids()) == 0
                     )
-                    logging.info("号入力ダイアログが閉じられました")
+                    logging.info("号入力ダイアログが閉じられました（全ダイアログ非表示）")
                 except TimeoutException:
                     logging.warning("号入力ダイアログが閉じられるのを待機中にタイムアウト")
                     # ダイアログが閉じられない場合でも処理を続行
@@ -1481,7 +1706,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 # キャンセルチェック（待機前）
                 check_cancellation()
                 
-                time.sleep(1)
+                time.sleep(0.2)
                 
                 # キャンセルチェック（クリック前）
                 check_cancellation()
@@ -1493,8 +1718,8 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 # キャンセルチェック（画面遷移待機前）
                 check_cancellation()
                 
-                # クリック後の画面遷移を待機
-                time.sleep(2)
+                # クリック後の画面遷移待機（短縮、以降は画像ポーリングで待機）
+                time.sleep(0.2)
                 
                 # キャンセルチェック（画像確認前）
                 check_cancellation()
@@ -1504,12 +1729,11 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                     # 提供可能、調査中、提供不可の画像パターンを定義
                     image_patterns = {
                         "available": {
-                            "urls": [
-                                "//img[@src='https://flets-w.ntt-west.co.jp/resources/form_element/img/img_available_03.png']",
-                                "//img[contains(@src, 'img_available_03.png')]",
-                                "//img[contains(@src, 'available')]",
-                                "//img[@alt='提供可能']"
+                            "src_contains": [
+                                "img_available_03.png",
+                                "available"
                             ],
+                            "alt_contains": ["提供可能"],
                             "status": "available",
                             "message": "提供可能",
                             "details": {
@@ -1519,11 +1743,11 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                             }
                         },
                         "investigation": {
-                            "urls": [
-                                "//img[@src='https://flets-w.ntt-west.co.jp/resources/form_element/img/img_investigation_03_1.png']",
-                                "//img[contains(@src, 'img_investigation_03')]",
-                                "//img[contains(@src, 'investigation')]"
+                            "src_contains": [
+                                "img_investigation_03",
+                                "investigation"
                             ],
+                            "alt_contains": [],
                             "status": "failure",
                             "message": "要手動再検索（住所をご確認ください）",
                             "details": {
@@ -1533,13 +1757,11 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                             }
                         },
                         "not_provided": {
-                            "urls": [
-                                "//img[@src='https://flets-w.ntt-west.co.jp/resources/form_element/img/img_not_provided.png']",
-                                "//img[contains(@src, 'img_not_provided')]",
-                                "//img[contains(@src, 'not_provided')]",
-                                "//img[contains(@alt, '提供不可')]",
-                                "//img[contains(@alt, '未提供')]"
+                            "src_contains": [
+                                "img_not_provided",
+                                "not_provided"
                             ],
+                            "alt_contains": ["提供不可", "未提供"],
                             "status": "unavailable",
                             "message": "未提供",
                             "details": {
@@ -1552,30 +1774,48 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                     
                     found_image = None
                     found_pattern = None
-                    
-                    # 各パターンを順番に確認
-                    for pattern_name, pattern_info in image_patterns.items():
-                        # キャンセルチェック（パターンループ開始時）
-                        check_cancellation()
-                        
-                        for url_pattern in pattern_info["urls"]:
+
+                    def detect_pattern_from_visible_images():
+                        visible_images = []
+                        for image in driver.find_elements(By.TAG_NAME, "img"):
                             try:
-                                # キャンセルチェック（URL検索前）
-                                check_cancellation()
-                                
-                                image = WebDriverWait(driver, 5).until(
-                                    EC.presence_of_element_located((By.XPATH, url_pattern))
-                                )
-                                if image and image.is_displayed():
-                                    logging.info(f"{pattern_name}の画像が見つかりました: {url_pattern}")
-                                    found_image = image
-                                    found_pattern = pattern_info
-                                    break
-                            except Exception as e:
-                                logging.warning(f"パターン {url_pattern} での検索に失敗: {str(e)}")
+                                if not image.is_displayed():
+                                    continue
+                                src = (image.get_attribute("src") or "")
+                                alt = (image.get_attribute("alt") or "")
+                                visible_images.append({
+                                    "element": image,
+                                    "src": src,
+                                    "src_lower": src.lower(),
+                                    "alt": alt
+                                })
+                            except Exception:
                                 continue
-                        if found_image:
+
+                        for pattern_name, pattern_info in image_patterns.items():
+                            for img_data in visible_images:
+                                src_hit = any(token.lower() in img_data["src_lower"] for token in pattern_info["src_contains"])
+                                alt_hit = any(token in img_data["alt"] for token in pattern_info["alt_contains"])
+                                if src_hit or alt_hit:
+                                    return pattern_name, pattern_info, img_data
+                        return None, None, None
+
+                    # 検索結果画像は遷移直後に遅れて表示されるため、短周期で一括ポーリング
+                    detection_timeout_sec = 10
+                    detection_interval_sec = 0.25
+                    deadline = time.time() + detection_timeout_sec
+
+                    while time.time() < deadline and not found_pattern:
+                        check_cancellation()
+                        pattern_name, pattern_info, matched_image = detect_pattern_from_visible_images()
+                        if pattern_info:
+                            found_image = matched_image["element"]
+                            found_pattern = pattern_info
+                            logging.info(
+                                f"{pattern_name}の画像が見つかりました: src='{matched_image['src']}' alt='{matched_image['alt']}'"
+                            )
                             break
+                        time.sleep(detection_interval_sec)
                     
                     if found_image and found_pattern:
                         # キャンセルチェック（スクリーンショット前）
