@@ -474,17 +474,16 @@ def find_best_address_match(input_address, candidates):
     
     return None, best_similarity
 
-def handle_building_selection(driver, progress_callback=None, show_popup=True):
+def handle_building_selection(driver, progress_callback=None, show_popup=True, note_callback=None):
     """
-    建物選択モーダルの検出と集合住宅判定
-    モーダルが表示されない場合は正常に処理を続行
-    集合住宅と判定した場合はスクリーンショットを保存し、判定結果を返す
+    建物選択モーダルの検出と建物未指定ボタン選択
+    モーダルが表示された場合は優先順位に従って自動選択し、処理を続行する
     Args:
         driver: Selenium WebDriverインスタンス
         progress_callback: 進捗コールバック関数（任意）
         show_popup: ポップアップ表示フラグ
     Returns:
-        dict or None: 集合住宅判定時は判定結果辞書、それ以外はNone
+        dict or None: 基本はNone（処理継続）。選択不能時のみ集合住宅判定結果を返す
     """
     try:
         # 建物選択モーダルが表示されているか確認（短い待機時間で）
@@ -496,14 +495,64 @@ def handle_building_selection(driver, progress_callback=None, show_popup=True):
             logging.info("建物選択モーダルは表示されていません - 処理を続行します")
             return None
         
-        logging.info("建物選択モーダルが表示されました（集合住宅判定）")
+        logging.info("建物選択モーダルが表示されました（建物未指定で継続を試行）")
         if progress_callback:
-            progress_callback("集合住宅と判定しました。スクリーンショットを保存します。")
-        # スクリーンショットを保存
-        screenshot_path = f"apartment_detected.png"
+            progress_callback("建物選択モーダルを処理中...")
+
+        def _find_clickable_by_text(candidates):
+            for text in candidates:
+                xpath = (
+                    "//*[@id='buildingNameSelectModal']"
+                    "//*[self::a or self::button]"
+                    f"[contains(normalize-space(.), '{text}')]"
+                )
+                try:
+                    return WebDriverWait(driver, 1).until(
+                        EC.element_to_be_clickable((By.XPATH, xpath))
+                    )
+                except Exception:
+                    continue
+            return None
+
+        primary_labels = ["建物を選択しない", "建物名を選択しない", "建物名を入力しない"]
+        secondary_labels = ["該当する建物名がない", "該当する建物がない", "建物名が見つからない"]
+
+        target_button = _find_clickable_by_text(primary_labels)
+        selected_label = "建物を選択しない"
+
+        if target_button is None:
+            target_button = _find_clickable_by_text(secondary_labels)
+            selected_label = "該当する建物名がない"
+
+        if target_button is not None:
+            try:
+                driver.execute_script("arguments[0].scrollIntoView(true);", target_button)
+            except Exception:
+                pass
+
+            try:
+                target_button.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", target_button)
+
+            logging.info(f"建物選択モーダルで「{selected_label}」を選択しました")
+            if progress_callback:
+                progress_callback(f"建物選択モーダル: 「{selected_label}」を選択")
+            if selected_label == "該当する建物名がない" and callable(note_callback):
+                note_callback("建物選択で「該当する建物名がない」を選択して検索しています")
+
+            try:
+                WebDriverWait(driver, 5).until(
+                    EC.invisibility_of_element_located((By.ID, "buildingNameSelectModal"))
+                )
+            except TimeoutException:
+                logging.warning("建物選択モーダルが閉じるまでの待機でタイムアウトしましたが処理を続行します")
+
+            return None
+
+        logging.warning("建物選択モーダルに優先ボタンが見つからなかったため集合住宅判定にフォールバックします")
+        screenshot_path = "apartment_detected.png"
         take_screenshot_if_enabled(driver, screenshot_path)
-        logging.info(f"集合住宅判定時のスクリーンショットを保存しました: {screenshot_path}")
-        # 判定結果を返す
         return {
             "status": "apartment",
             "message": "集合住宅（アパート・マンション等）",
@@ -520,7 +569,7 @@ def handle_building_selection(driver, progress_callback=None, show_popup=True):
         return None
     except Exception as e:
         logging.error(f"建物選択モーダルの処理中にエラー: {str(e)}")
-        driver.save_screenshot("debug_building_modal_error.png")
+        take_screenshot_if_enabled(driver, "debug_building_modal_error.png")
         raise
 
 def create_driver(headless=False):
@@ -580,7 +629,7 @@ def _load_browser_settings(path="settings.json"):
 
 
 _BROWSER_SETTINGS = _load_browser_settings()
-ENABLE_SCREENSHOTS = _BROWSER_SETTINGS.get("enable_screenshots", True)
+ENABLE_SCREENSHOTS = False
 
 
 def take_screenshot_if_enabled(driver, save_path):
@@ -589,20 +638,8 @@ def take_screenshot_if_enabled(driver, save_path):
     `take_full_page_screenshot` を呼ぶラッパ。
     無効の場合は何もしない（Noneを返す）。
     """
-    # 設定ファイルの現在値を動的にチェックして即時反映させる
-    try:
-        cur = _load_browser_settings()
-        enabled = cur.get("enable_screenshots", ENABLE_SCREENSHOTS)
-    except Exception:
-        enabled = ENABLE_SCREENSHOTS
-    if not enabled:
-        logging.info(f"スクリーンショット無効のためスキップ: {save_path}")
-        return None
-    try:
-        return _take_full_page_screenshot_impl(driver, save_path)
-    except Exception as e:
-        logging.warning(f"スクリーンショット取得に失敗しました: {e}")
-        return None
+    logging.debug(f"スクリーンショット保存は無効化されています: {save_path}")
+    return None
 
 
 def _take_full_page_screenshot_impl(driver, save_path):
@@ -756,6 +793,84 @@ def search_service_area_west(postal_code, address, progress_callback=None):
         dict: 検索結果を含む辞書
     """
     global global_driver
+
+    search_notes = []
+
+    def add_search_note(note):
+        if note and note not in search_notes:
+            search_notes.append(note)
+            logging.info(f"検索備考を追加: {note}")
+
+    def finalize_result(result):
+        if not isinstance(result, dict):
+            return result
+        if search_notes:
+            details = result.get("details")
+            if isinstance(details, dict):
+                existing_note = str(details.get("備考", "")).strip()
+                extra_note = " / ".join(search_notes)
+                details["備考"] = f"{existing_note} / {extra_note}" if existing_note else extra_note
+            result["search_notes"] = search_notes.copy()
+        return result
+
+    def _normalize_numeric_text(token):
+        if token is None:
+            return ""
+        normalized = str(token).strip()
+        return normalized.translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+
+    def _extract_primary_number(token):
+        normalized = _normalize_numeric_text(token)
+        match = re.search(r"\d+", normalized)
+        if not match:
+            return None
+        try:
+            return int(match.group())
+        except Exception:
+            return None
+
+    def choose_nearest_button(all_buttons, target_token):
+        if not target_token:
+            return None, None
+
+        excluded_labels = {
+            "番地なし",
+            "（番地なし）",
+            "号なし",
+            "（号なし）",
+            "該当する住所がない",
+        }
+
+        target_normalized = normalize_string(str(target_token))
+        target_number = _extract_primary_number(target_token)
+        best_button = None
+        best_text = None
+        best_key = None
+
+        for button in all_buttons:
+            try:
+                button_text = button.text.strip()
+            except Exception:
+                continue
+
+            if not button_text or button_text in excluded_labels:
+                continue
+
+            candidate_normalized = normalize_string(button_text)
+            text_similarity = calculate_similarity(target_normalized, candidate_normalized)
+            candidate_number = _extract_primary_number(button_text)
+
+            if target_number is not None and candidate_number is not None:
+                key = (0, abs(candidate_number - target_number), -text_similarity, len(candidate_normalized))
+            else:
+                key = (1, -text_similarity, len(candidate_normalized))
+
+            if best_key is None or key < best_key:
+                best_key = key
+                best_button = button
+                best_text = button_text
+
+        return best_button, best_text
     
     # キャンセルフラグをリセット
     clear_cancel_flag()
@@ -776,7 +891,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
         logging.info(f"正規化後住所: {address}")
     except Exception as e:
         logging.error(f"正規化処理中にエラー: {str(e)}")
-        return {"status": "error", "message": f"住所の正規化に失敗しました: {str(e)}"}
+        return finalize_result({"status": "error", "message": f"住所の正規化に失敗しました: {str(e)}"})
 
     # 住所を分割
     if progress_callback:
@@ -787,7 +902,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
     
     address_parts = split_address(address)
     if not address_parts:
-        return {"status": "error", "message": "住所の分割に失敗しました。"}
+        return finalize_result({"status": "error", "message": "住所の分割に失敗しました。"})
         
     # 基本住所を構築（番地と号を除く）
     base_address = f"{address_parts['prefecture']}{address_parts['city']}{address_parts['town']}"
@@ -801,6 +916,8 @@ def search_service_area_west(postal_code, address, progress_callback=None):
     building_number = None
     selected_banchi_text = None
     banchi_stage_pending = False
+    final_search_clicked_early = False
+    number_dialog_wait_timeout = 15
     number_prefix = address_parts.get('number_prefix')
     number_suffix = address_parts.get('number_suffix')
     if address_parts['number']:
@@ -813,7 +930,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
     # 郵便番号のフォーマットチェック
     postal_code_clean = postal_code.replace("-", "")
     if len(postal_code_clean) != 7 or not postal_code_clean.isdigit():
-        return {"status": "error", "message": "郵便番号は7桁の数字で入力してください。"}
+        return finalize_result({"status": "error", "message": "郵便番号は7桁の数字で入力してください。"})
     
     # ブラウザ設定を読み込む
     browser_settings = {}
@@ -1075,9 +1192,14 @@ def search_service_area_west(postal_code, address, progress_callback=None):
             if not best_candidate:
                 best_candidate, similarity = find_best_address_match(base_address, valid_candidates)
             
+            target_base_address = f"{base_address}{number_prefix}" if number_prefix else base_address
+
             if best_candidate:
                 selected_address = best_candidate.text.strip().split('\n')[0]
                 logging.info(f"選択された住所: '{selected_address}' (類似度: {similarity})")
+
+                if normalize_string(selected_address) != normalize_string(target_base_address):
+                    add_search_note(f"基本住所は完全一致なしのため「{selected_address}」で検索しています")
                 
                 # キャンセルチェック
                 check_cancellation()
@@ -1120,11 +1242,48 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 
                 # キャンセルチェック
                 check_cancellation()
+
+                def is_banchi_modal_loading_started():
+                    try:
+                        dialog_elements = driver.find_elements(By.ID, "DIALOG_ID01")
+                        if dialog_elements:
+                            return True
+                    except Exception:
+                        pass
+
+                    loading_selectors = [
+                        ".loading",
+                        ".spinner",
+                        ".modal-backdrop",
+                        "[id*='loading']",
+                        "[class*='loading']",
+                    ]
+                    for selector in loading_selectors:
+                        try:
+                            for elem in driver.find_elements(By.CSS_SELECTOR, selector):
+                                if elem.is_displayed():
+                                    return True
+                        except Exception:
+                            continue
+
+                    return False
                 
                 # 番地入力ダイアログが表示されるまで待機
-                banchi_dialog = WebDriverWait(driver, 15).until(
-                    EC.visibility_of_element_located((By.ID, "DIALOG_ID01"))
-                )
+                banchi_dialog = None
+                try:
+                    banchi_dialog = WebDriverWait(driver, 2).until(
+                        EC.visibility_of_element_located((By.ID, "DIALOG_ID01"))
+                    )
+                except TimeoutException:
+                    if is_banchi_modal_loading_started():
+                        logging.info("番地入力モーダルの読み込み開始を検出。表示完了まで追加で待機します")
+                        banchi_dialog = WebDriverWait(driver, 30).until(
+                            EC.visibility_of_element_located((By.ID, "DIALOG_ID01"))
+                        )
+                    else:
+                        logging.info("番地入力モーダルの読み込み開始が検出されなかったため、番地入力をスキップします")
+                        raise
+
                 logging.info("番地入力ダイアログが表示されました")
                 
                 # 番地がない場合は「番地なし」を選択
@@ -1203,7 +1362,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                             
                         except Exception as e:
                             logging.error(f"「（番地なし）」の選択に失敗: {str(e)}")
-                            driver.save_screenshot("debug_no_address_error.png")
+                            take_screenshot_if_enabled(driver, "debug_no_address_error.png")
                             raise
                 else:
                     # 番地を入力
@@ -1245,6 +1404,8 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                         
                         # 番地ボタンを探す（優先順位付き）
                         banchi_button = None
+                        banchi_nearest_button = None
+                        banchi_nearest_text = None
                         banchi_prefix_button = None
                         banchi_nashi_button = None
                         gaitou_nashi_button = None
@@ -1280,6 +1441,13 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                                 logging.warning(f"ボタンテキストの取得中にエラー: {str(e)}")
                                 continue
                         
+                        if not banchi_button and input_street_number:
+                            banchi_nearest_button, banchi_nearest_text = choose_nearest_button(all_buttons, input_street_number)
+                            if banchi_nearest_button:
+                                logging.info(
+                                    f"番地の完全一致がないため近似候補を採用します: 入力='{input_street_number}', 選択='{banchi_nearest_text}'"
+                                )
+
                         # 優先順位に従ってボタンを選択
                         if number_prefix and street_number and banchi_prefix_button:
                             target_button = banchi_prefix_button
@@ -1293,6 +1461,15 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                                 selected_button_text = "(取得失敗)"
                             selected_banchi_text = selected_button_text
                             logging.info(f"番地ボタンを選択: 実際='{selected_button_text}' / 入力番地='{input_street_number}'")
+                        elif banchi_nearest_button:
+                            target_button = banchi_nearest_button
+                            selected_banchi_text = banchi_nearest_text
+                            add_search_note(
+                                f"番地は完全一致なしのため近い候補「{banchi_nearest_text}」で代替検索しています（入力: {input_street_number}）"
+                            )
+                            logging.info(
+                                f"番地の近似候補を選択: 実際='{banchi_nearest_text}' / 入力番地='{input_street_number}'"
+                            )
                         elif not input_street_number and banchi_nashi_button:
                             target_button = banchi_nashi_button
                             selected_banchi_text = "番地なし"
@@ -1347,12 +1524,12 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                                 raise
                         else:
                             logging.error("適切なボタンが見つかりませんでした")
-                            driver.save_screenshot("debug_banchi_not_found.png")
+                            take_screenshot_if_enabled(driver, "debug_banchi_not_found.png")
                             raise ValueError("適切なボタンが見つかりませんでした")
                             
                     except Exception as e:
                         logging.error(f"番地選択処理中にエラー: {str(e)}")
-                        driver.save_screenshot("debug_banchi_error.png")
+                        take_screenshot_if_enabled(driver, "debug_banchi_error.png")
                         logging.info("エラー発生時のスクリーンショットを保存しました")
                         raise
                     
@@ -1368,8 +1545,26 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 
             except TimeoutException:
                 logging.info("番地入力画面はスキップされました")
+                early_clicked = False
+                try:
+                    early_final_button = WebDriverWait(driver, 1).until(
+                        EC.element_to_be_clickable((By.ID, "id_tak_bt_nx"))
+                    )
+                    driver.execute_script("arguments[0].scrollIntoView(true);", early_final_button)
+                    time.sleep(0.1)
+                    early_final_button.click()
+                    final_search_clicked_early = True
+                    number_dialog_wait_timeout = 1
+                    add_search_note("番地・号入力モーダルが表示されない住所のため、基本住所のまま検索結果を確認しています")
+                    logging.info("番地入力モーダル未表示のため、検索結果確認ボタンを先行クリックしました")
+                    early_clicked = True
+                except TimeoutException:
+                    pass
+                except Exception as early_click_error:
+                    logging.warning(f"検索結果確認ボタンの先行クリックに失敗: {str(early_click_error)}")
+
                 # サイト側で番地入力がDIALOG_ID02以降に統合されるケースを考慮
-                if street_number or building_number or number_suffix:
+                if (not early_clicked) and (street_number or building_number or number_suffix):
                     banchi_stage_pending = True
                     logging.info("番地入力は後続ダイアログで継続します（DIALOG_ID01未表示）")
             
@@ -1411,7 +1606,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                     return WebDriverWait(driver, timeout).until(_find_visible)
 
                 # 号入力ダイアログが表示されるまで待機（IDは動的）
-                current_number_dialog_id = wait_for_number_dialog(timeout=15)
+                current_number_dialog_id = wait_for_number_dialog(timeout=number_dialog_wait_timeout)
                 logging.info(f"号入力ダイアログが表示されました: {current_number_dialog_id}")
                 
                 # 号を入力
@@ -1477,6 +1672,10 @@ def search_service_area_west(postal_code, address, progress_callback=None):
 
                     target_button_exact = None
                     target_button_candidate = None
+                    target_button_nearest = None
+                    target_button_nearest_text = None
+                    numeric_fallback_button = None
+                    numeric_fallback_text = None
                     gou_nashi_button = None
                     banchi_nashi_button = None
                     gou_empty_button = None
@@ -1496,6 +1695,17 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                                 if target_number and (button_text == target_number or button_text == zen_target_number):
                                     target_button_exact = button
                                     logging.info(f"{phase_name}ボタンが見つかりました: {button_text}")
+                            elif not target_number and re.search(r"\d+", button_text):
+                                normalized_button_number = _extract_primary_number(button_text)
+                                if normalized_button_number is not None:
+                                    if numeric_fallback_button is None:
+                                        numeric_fallback_button = button
+                                        numeric_fallback_text = button_text
+                                    else:
+                                        current_fallback_number = _extract_primary_number(numeric_fallback_text)
+                                        if current_fallback_number is None or normalized_button_number < current_fallback_number:
+                                            numeric_fallback_button = button
+                                            numeric_fallback_text = button_text
                             elif not button_text and gou_empty_button is None:
                                 gou_empty_button = button
                                 logging.info(f"空テキストの号ボタンを検出しました（{phase_name}なし候補）")
@@ -1514,6 +1724,13 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                             logging.warning(f"ボタンテキストの取得中にエラー: {str(e)}")
                             continue
 
+                    if not target_button_exact and not target_button_candidate and target_number:
+                        target_button_nearest, target_button_nearest_text = choose_nearest_button(all_buttons, target_number)
+                        if target_button_nearest:
+                            logging.info(
+                                f"{phase_name}の完全一致がないため近似候補を採用します: 入力='{target_number}', 選択='{target_button_nearest_text}'"
+                            )
+
                     # 優先順位に従ってボタンを選択
                     if target_button_exact:
                         target_button = target_button_exact
@@ -1521,6 +1738,21 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                     elif target_button_candidate:
                         target_button = target_button_candidate
                         logging.info(f"{phase_name}候補トークンに一致したボタンを選択")
+                    elif target_button_nearest:
+                        target_button = target_button_nearest
+                        add_search_note(
+                            f"{phase_name}は完全一致なしのため近い候補「{target_button_nearest_text}」で代替検索しています（入力: {target_number}）"
+                        )
+                        logging.info(f"{phase_name}の近似候補を選択: 入力='{target_number}', 実際='{target_button_nearest_text}'")
+                    elif not target_number and banchi_nashi_button:
+                        target_button = banchi_nashi_button
+                        logging.info(f"{phase_name}の指定がないため「番地なし」系ボタンを優先選択")
+                    elif not target_number and numeric_fallback_button:
+                        target_button = numeric_fallback_button
+                        add_search_note(
+                            f"{phase_name}が未指定のため近い候補「{numeric_fallback_text}」で代替検索しています"
+                        )
+                        logging.info(f"{phase_name}が未指定のため数値候補を次点で選択: 実際='{numeric_fallback_text}'")
                     elif target_number and prefer_banchi_nashi and banchi_nashi_button:
                         target_button = banchi_nashi_button
                         logging.info(f"指定した{phase_name}が見つからないため「番地なし」系ボタンを選択（フォールバック）")
@@ -1530,18 +1762,12 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                     elif target_number and gaitou_nashi_button:
                         target_button = gaitou_nashi_button
                         logging.info(f"指定した{phase_name}が見つからないため「該当する住所がない」ボタンを選択（フォールバック）")
-                    elif not target_number and prefer_banchi_nashi and banchi_nashi_button:
-                        target_button = banchi_nashi_button
-                        logging.info(f"{phase_name}の指定がないため「番地なし」系ボタンを選択")
                     elif not target_number and gou_nashi_button:
                         target_button = gou_nashi_button
                         logging.info(f"{phase_name}の指定がないため「号なし」系ボタンを選択")
                     elif not target_number and gou_empty_button:
                         target_button = gou_empty_button
                         logging.info(f"{phase_name}の指定がないため空テキストの号ボタンを選択")
-                    elif not target_number and banchi_nashi_button:
-                        target_button = banchi_nashi_button
-                        logging.info(f"{phase_name}の指定がないため「番地なし」系ボタンを選択")
                     elif gou_nashi_button:
                         target_button = gou_nashi_button
                         logging.info(f"指定した{phase_name}が見つからないため「号なし」系ボタンを選択（フォールバック）")
@@ -1559,7 +1785,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
 
                     if not target_button:
                         logging.error(f"適切なボタンが見つかりませんでした: {phase_name}")
-                        driver.save_screenshot("debug_gou_not_found.png")
+                        take_screenshot_if_enabled(driver, "debug_gou_not_found.png")
                         raise ValueError("適切なボタンが見つかりませんでした")
 
                     # クリック実行
@@ -1652,7 +1878,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                         
                 except Exception as e:
                     logging.error(f"号選択処理中にエラー: {str(e)}")
-                    driver.save_screenshot("debug_gou_error.png")
+                    take_screenshot_if_enabled(driver, "debug_gou_error.png")
                     logging.info("エラー発生時のスクリーンショットを保存しました")
                     raise
                 
@@ -1668,12 +1894,14 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 
             except TimeoutException:
                 logging.info("号入力画面はスキップされました")
+                if (not final_search_clicked_early) and (banchi_stage_pending or street_number or building_number or number_suffix):
+                    add_search_note("番地・号入力モーダルが表示されない住所のため、基本住所のまま検索結果を確認しています")
             
             # 建物選択モーダルの処理
-            result = handle_building_selection(driver, progress_callback, show_popup)
+            result = handle_building_selection(driver, progress_callback, show_popup, note_callback=add_search_note)
             if result is not None:
                 logging.info(f"search_service_area_west: apartment返却: {result}")
-                return result
+                return finalize_result(result)
             # 7. 結果の判定
             try:
                 if progress_callback:
@@ -1682,38 +1910,41 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 # キャンセルチェック（検索結果確認前）
                 check_cancellation()
                 
-                # 検索結果確認ボタンをクリック
-                logging.info("検索結果確認ボタンの検出を開始します")
-                
-                # 指定されたIDを持つボタンを待機して検出
-                final_search_button = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.ID, "id_tak_bt_nx"))
-                )
-                
-                # キャンセルチェック（ボタン検出後）
-                check_cancellation()
-                
-                # ボタンが見つかった場合の情報をログ出力
-                button_html = final_search_button.get_attribute('outerHTML')
-                logging.info(f"検索結果確認ボタンが見つかりました: {button_html}")
-                
-                # キャンセルチェック（スクロール前）
-                check_cancellation()
-                
-                # スクロールしてボタンを表示
-                driver.execute_script("arguments[0].scrollIntoView(true);", final_search_button)
-                
-                # キャンセルチェック（待機前）
-                check_cancellation()
-                
-                time.sleep(0.2)
-                
-                # キャンセルチェック（クリック前）
-                check_cancellation()
-                
-                # ボタンをクリック
-                final_search_button.click()
-                logging.info("検索結果確認ボタンをクリックしました")
+                if not final_search_clicked_early:
+                    # 検索結果確認ボタンをクリック
+                    logging.info("検索結果確認ボタンの検出を開始します")
+                    
+                    # 指定されたIDを持つボタンを待機して検出
+                    final_search_button = WebDriverWait(driver, 10).until(
+                        EC.element_to_be_clickable((By.ID, "id_tak_bt_nx"))
+                    )
+                    
+                    # キャンセルチェック（ボタン検出後）
+                    check_cancellation()
+                    
+                    # ボタンが見つかった場合の情報をログ出力
+                    button_html = final_search_button.get_attribute('outerHTML')
+                    logging.info(f"検索結果確認ボタンが見つかりました: {button_html}")
+                    
+                    # キャンセルチェック（スクロール前）
+                    check_cancellation()
+                    
+                    # スクロールしてボタンを表示
+                    driver.execute_script("arguments[0].scrollIntoView(true);", final_search_button)
+                    
+                    # キャンセルチェック（待機前）
+                    check_cancellation()
+                    
+                    time.sleep(0.2)
+                    
+                    # キャンセルチェック（クリック前）
+                    check_cancellation()
+                    
+                    # ボタンをクリック
+                    final_search_button.click()
+                    logging.info("検索結果確認ボタンをクリックしました")
+                else:
+                    logging.info("検索結果確認ボタンは先行クリック済みのため再クリックをスキップします")
                 
                 # キャンセルチェック（画面遷移待機前）
                 check_cancellation()
@@ -1739,7 +1970,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                             "details": {
                                 "判定結果": "OK",
                                 "提供エリア": "提供可能エリアです",
-                                "備考": "フレッツ光のサービスがご利用いただけます"
+                                "備考": ""
                             }
                         },
                         "investigation": {
@@ -1767,7 +1998,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                             "details": {
                                 "判定結果": "NG",
                                 "提供エリア": "提供対象外エリアです",
-                                "備考": "申し訳ございませんが、このエリアではサービスを提供しておりません"
+                                "備考": ""
                             }
                         }
                     }
@@ -1834,7 +2065,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                         logging.info(f"search_service_area_west: available返却: {result}")
                         if progress_callback:
                             progress_callback(f"{result['message']}が確認されました")
-                        return result
+                        return finalize_result(result)
                     else:
                         # キャンセルチェック（失敗時のスクリーンショット前）
                         check_cancellation()
@@ -1857,7 +2088,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                         logging.info(f"search_service_area_west: failure返却: {result}")
                         if progress_callback:
                             progress_callback("判定できませんでした")
-                        return result
+                        return finalize_result(result)
                         
                 except TimeoutException:
                     # タイムアウト時のスクリーンショットを保存
@@ -1866,7 +2097,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                     logging.info("提供可能画像が見つかりませんでした - スクリーンショットを保存しました")
                     if progress_callback:
                         progress_callback("タイムアウトが発生しました")
-                    return {
+                    return finalize_result({
                         "status": "failure",
                         "message": "判定失敗",
                         "details": {
@@ -1876,7 +2107,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                         },
                         "screenshot": screenshot_path,
                         "show_popup": show_popup  # ポップアップ表示設定を追加
-                    }
+                    })
                 except Exception as e:
                     # エラー時のスクリーンショットを保存
                     screenshot_path = "debug_error_confirmation.png"
@@ -1884,7 +2115,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                     logging.error(f"提供判定の確認中にエラー: {str(e)}")
                     if progress_callback:
                         progress_callback("エラーが発生しました")
-                    return {
+                    return finalize_result({
                         "status": "failure",
                         "message": "判定失敗",
                         "details": {
@@ -1894,7 +2125,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                         },
                         "screenshot": screenshot_path,
                         "show_popup": show_popup  # ポップアップ表示設定を追加
-                    }
+                    })
             
             except Exception as e:
                 logging.error(f"結果の判定中にエラー: {str(e)}")
@@ -1902,7 +2133,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 take_full_page_screenshot(driver, screenshot_path)
                 if progress_callback:
                     progress_callback("エラーが発生しました")
-                return {
+                return finalize_result({
                     "status": "failure", 
                     "message": "判定失敗",
                     "details": {
@@ -1912,7 +2143,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                     },
                     "screenshot": screenshot_path,
                     "show_popup": show_popup  # ポップアップ表示設定を追加
-                }
+                })
                 
         except TimeoutException as e:
             logging.error(f"住所候補の表示待ちでタイムアウトしました: {str(e)}")
@@ -1920,7 +2151,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
             take_full_page_screenshot(driver, screenshot_path)
             if progress_callback:
                 progress_callback("タイムアウトが発生しました")
-            return {
+            return finalize_result({
                 "status": "failure",
                 "message": "判定失敗",
                 "details": {
@@ -1930,7 +2161,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 },
                 "screenshot": screenshot_path,
                 "show_popup": show_popup  # ポップアップ表示設定を追加
-            }
+            })
         except CancellationError:
             # キャンセル例外は再発生させて上位で処理
             logging.info("住所選択処理中にキャンセルが検出されました")
@@ -1941,7 +2172,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
             take_full_page_screenshot(driver, screenshot_path)
             if progress_callback:
                 progress_callback("エラーが発生しました")
-            return {
+            return finalize_result({
                 "status": "failure",
                 "message": "判定失敗",
                 "details": {
@@ -1951,7 +2182,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 },
                 "screenshot": screenshot_path,
                 "show_popup": show_popup  # ポップアップ表示設定を追加
-            }
+            })
     
     except CancellationError as e:
         logging.error(f"自動化に失敗しました: {str(e)}")
@@ -1964,7 +2195,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
             take_full_page_screenshot(driver, screenshot_path)
         if progress_callback:
             progress_callback("エラーが発生しました")
-        return {
+        return finalize_result({
             "status": "failure",
             "message": "判定失敗",
             "details": {
@@ -1974,11 +2205,18 @@ def search_service_area_west(postal_code, address, progress_callback=None):
             },
             "screenshot": screenshot_path,
             "show_popup": show_popup  # ポップアップ表示設定を追加
-        }
+        })
     
     finally:
-        # どのような場合でもブラウザは閉じない
         if driver:
-            logging.info("ブラウザウィンドウを維持します - 手動で閉じてください")            # driver.quit() を呼び出さない
-            # グローバル変数にドライバーを保持
-            global_driver = driver
+            if auto_close:
+                try:
+                    driver.quit()
+                    global_driver = None
+                    logging.info("ブラウザを自動終了しました")
+                except Exception as close_error:
+                    logging.warning(f"ブラウザの終了中にエラー: {str(close_error)}")
+                    global_driver = driver
+            else:
+                logging.info("ブラウザウィンドウを維持します - 手動で閉じてください")
+                global_driver = driver

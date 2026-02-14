@@ -374,6 +374,25 @@ def search_service_area(postal_code, address, progress_callback=None):
         dict: 検索結果を含む辞書
     """
     global global_driver
+
+    search_notes = []
+
+    def add_search_note(note):
+        if note and note not in search_notes:
+            search_notes.append(note)
+            logging.info(f"検索備考を追加: {note}")
+
+    def finalize_result(result):
+        if not isinstance(result, dict):
+            return result
+        if search_notes:
+            details = result.get("details")
+            if isinstance(details, dict):
+                existing_note = str(details.get("備考", "")).strip()
+                extra_note = " / ".join(search_notes)
+                details["備考"] = f"{existing_note} / {extra_note}" if existing_note else extra_note
+            result["search_notes"] = search_notes.copy()
+        return result
     
     # デバッグログ：入力値の確認
     logging.info(f"=== 検索開始 ===")
@@ -388,7 +407,7 @@ def search_service_area(postal_code, address, progress_callback=None):
         logging.info(f"正規化後住所: {address}")
     except Exception as e:
         logging.error(f"正規化処理中にエラー: {str(e)}")
-        return {"status": "error", "message": f"住所の正規化に失敗しました: {str(e)}"}
+        return finalize_result({"status": "error", "message": f"住所の正規化に失敗しました: {str(e)}"})
     
     # 住所を分割
     if progress_callback:
@@ -400,7 +419,7 @@ def search_service_area(postal_code, address, progress_callback=None):
     address_parts = split_address(address)
     if not address_parts:
         logging.error("住所の分割に失敗しました")
-        return {"status": "error", "message": "住所の分割に失敗しました。"}
+        return finalize_result({"status": "error", "message": "住所の分割に失敗しました。"})
         
     # 基本住所を構築（番地と号を除く）
     base_address = f"{address_parts['prefecture']}{address_parts['city']}{address_parts['town']}"
@@ -412,7 +431,7 @@ def search_service_area(postal_code, address, progress_callback=None):
     # 郵便番号のフォーマットチェック
     postal_code_clean = postal_code.replace("-", "")
     if len(postal_code_clean) != 7 or not postal_code_clean.isdigit():
-        return {"status": "error", "message": "郵便番号は7桁の数字で入力してください。"}
+        return finalize_result({"status": "error", "message": "郵便番号は7桁の数字で入力してください。"})
     
     # 郵便番号を前半3桁と後半4桁に分割
     postal_code_first = postal_code_clean[:3]
@@ -540,13 +559,13 @@ def search_service_area(postal_code, address, progress_callback=None):
                 if error_message:
                     error_text = error_message[0].text
                     logging.error(f"郵便番号エラー: {error_text}")
-                    return {"status": "error", "message": f"郵便番号エラー: {error_text}"}
+                    return finalize_result({"status": "error", "message": f"郵便番号エラー: {error_text}"})
             except Exception as e:
                 logging.info(f"エラーメッセージの確認中に例外が発生しましたが、処理を続行します: {str(e)}")
             
         except Exception as e:
             logging.error(f"郵便番号入力処理中にエラー: {str(e)}")
-            return {"status": "error", "message": f"郵便番号入力処理中にエラーが発生しました: {str(e)}"}
+            return finalize_result({"status": "error", "message": f"郵便番号入力処理中にエラーが発生しました: {str(e)}"})
         
         # 住所候補が表示されるのを待つ
         try:
@@ -586,6 +605,9 @@ def search_service_area(postal_code, address, progress_callback=None):
             if best_candidate:
                 selected_address = best_candidate.text.strip()
                 logging.info(f"選択された住所: '{selected_address}' (類似度: {similarity})")
+
+                if normalize_string(selected_address) != normalize_string(base_address):
+                    add_search_note(f"基本住所は完全一致なしのため「{selected_address}」で検索しています")
                 
                 try:
                     # JavaScriptを使用してクリックを実行
@@ -613,11 +635,11 @@ def search_service_area(postal_code, address, progress_callback=None):
                     # 番地入力画面の処理に進む
                     result = handle_address_number_input(driver, address_parts, progress_callback)
                     logging.info(f"番地入力処理の結果: {result}")
-                    return result
+                    return finalize_result(result)
                     
                 except Exception as e:
                     logging.error(f"住所選択処理に失敗: {str(e)}")
-                    driver.save_screenshot("debug_address_select_error.png")
+                    take_full_page_screenshot(driver, "debug_address_select_error.png")
                     raise
             else:
                 logging.error(f"適切な住所候補が見つかりませんでした。入力住所: {address}")
@@ -625,17 +647,17 @@ def search_service_area(postal_code, address, progress_callback=None):
             
         except Exception as e:
             logging.error(f"住所選択処理中にエラー: {str(e)}")
-            return {"status": "error", "message": f"住所選択処理中にエラーが発生しました: {str(e)}"}
+            return finalize_result({"status": "error", "message": f"住所選択処理中にエラーが発生しました: {str(e)}"})
             
     except CancellationError as e:
         logging.info("★★★ 提供エリア検索がキャンセルされました ★★★")
-        return {"status": "cancelled", "message": "検索がキャンセルされました"}
+        return finalize_result({"status": "cancelled", "message": "検索がキャンセルされました"})
     except TimeoutException as e:
         logging.error(f"タイムアウトエラー: {str(e)}")
-        return {"status": "failure", "message": "処理がタイムアウトしました"}
+        return finalize_result({"status": "failure", "message": "処理がタイムアウトしました"})
     except Exception as e:
         logging.error(f"検索処理中にエラー: {str(e)}")
-        return {"status": "error", "message": f"検索処理中にエラーが発生しました: {str(e)}"}
+        return finalize_result({"status": "error", "message": f"検索処理中にエラーが発生しました: {str(e)}"})
         
     finally:
         # ブラウザを終了
@@ -849,7 +871,7 @@ def handle_address_number_input(driver, address_parts, progress_callback=None):
                 # 建物選択画面が表示された時点で集合住宅と判定
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 screenshot_path = f"debug_apartment_confirmation_{timestamp}.png"
-                driver.save_screenshot(screenshot_path)
+                take_full_page_screenshot(driver, screenshot_path)
                 return {
                     "status": "apartment",
                     "message": "集合住宅",
@@ -939,35 +961,35 @@ def handle_address_number_input(driver, address_parts, progress_callback=None):
                 if result_text:
                     if "提供エリアです" in result_text or "の提供エリアです" in result_text:
                         screenshot_path = f"debug_available_confirmation_{timestamp}.png"
-                        driver.save_screenshot(screenshot_path)
+                        take_full_page_screenshot(driver, screenshot_path)
                         return {
                             "status": "available",
                             "message": "提供可能",
                             "details": {
                                 "判定結果": "OK",
                                 "提供エリア": "提供可能エリアです",
-                                "備考": "光アクセスのサービスがご利用いただけます"
+                                "備考": ""
                             },
                             "screenshot": screenshot_path,
                             "show_popup": show_popup
                         }
                     elif "提供エリア外です" in result_text or "エリア外" in result_text:
                         screenshot_path = f"debug_not_provided_confirmation_{timestamp}.png"
-                        driver.save_screenshot(screenshot_path)
+                        take_full_page_screenshot(driver, screenshot_path)
                         return {
                             "status": "unavailable",
                             "message": "未提供",
                             "details": {
                                 "判定結果": "NG",
                                 "提供エリア": "提供対象外エリアです",
-                                "備考": "申し訳ございませんが、このエリアではサービスを提供しておりません"
+                                "備考": ""
                             },
                             "screenshot": screenshot_path,
                             "show_popup": show_popup
                         }
                     else:
                         screenshot_path = f"debug_investigation_confirmation_{timestamp}.png"
-                        driver.save_screenshot(screenshot_path)
+                        take_full_page_screenshot(driver, screenshot_path)
                         logging.warning(f"予期しない結果テキスト: {result_text}")
                         return {
                             "status": "failure",
@@ -984,7 +1006,7 @@ def handle_address_number_input(driver, address_parts, progress_callback=None):
 
                     
                     screenshot_path = f"debug_error_confirmation_{timestamp}.png"
-                    driver.save_screenshot(screenshot_path)
+                    take_full_page_screenshot(driver, screenshot_path)
                     logging.error("結果テキストが取得できませんでした")
                     return {
                         "status": "failure",
@@ -1000,7 +1022,7 @@ def handle_address_number_input(driver, address_parts, progress_callback=None):
 
             except Exception as e:
                 screenshot_path = f"debug_error_confirmation_{timestamp}.png"
-                driver.save_screenshot(screenshot_path)
+                take_full_page_screenshot(driver, screenshot_path)
                 logging.error(f"結果テキストの取得中にエラー: {str(e)}")
                 return {
                     "status": "failure",
