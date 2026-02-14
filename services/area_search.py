@@ -21,6 +21,7 @@ import time
 import re
 import os
 import json
+import threading
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -37,6 +38,34 @@ from utils.address_utils import split_address, normalize_address
 # グローバル変数でブラウザドライバーを保持
 global_driver = None
 _global_cancel_flag = False
+_active_drivers = set()
+_active_drivers_lock = threading.Lock()
+
+
+def register_active_driver(driver):
+    if driver is None:
+        return
+    with _active_drivers_lock:
+        _active_drivers.add(driver)
+
+
+def unregister_active_driver(driver):
+    if driver is None:
+        return
+    with _active_drivers_lock:
+        _active_drivers.discard(driver)
+
+
+def close_active_drivers():
+    with _active_drivers_lock:
+        drivers = list(_active_drivers)
+        _active_drivers.clear()
+
+    for driver in drivers:
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 class CancellationError(Exception):
     """検索キャンセル時に発生する例外"""
@@ -757,9 +786,6 @@ def search_service_area_west(postal_code, address, progress_callback=None):
     """
     global global_driver
     
-    # キャンセルフラグをリセット
-    clear_cancel_flag()
-    
     # デバッグログ：入力値の確認
     logging.info(f"=== 検索開始 ===")
     logging.info(f"入力郵便番号（変換前）: {postal_code}")
@@ -861,6 +887,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
         
         # グローバル変数に保存
         global_driver = driver
+        register_active_driver(driver)
         
         # タイムアウト設定適用前にキャンセルチェック
         check_cancellation()

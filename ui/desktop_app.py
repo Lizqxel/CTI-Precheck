@@ -34,6 +34,11 @@ class DesktopApp:
         self.monitor_browser_var = tk.BooleanVar(value=False)
         self.show_popup_var = tk.BooleanVar(value=True)
         self.enable_screenshots_var = tk.BooleanVar(value=True)
+        self.parallel_count_var = tk.IntVar(value=2)
+        self.parallel_count_values = (1, 2, 3, 4)
+
+        self.worker_log_texts: List[tk.Text] = []
+        self.worker_logs_container: ttk.Frame | None = None
 
         self._load_settings_to_ui()
         self._build_ui()
@@ -67,6 +72,16 @@ class DesktopApp:
         ttk.Checkbutton(setting_frame, text="スクリーンショット保存", variable=self.enable_screenshots_var).pack(
             side=tk.LEFT, padx=(12, 0)
         )
+        ttk.Label(setting_frame, text="並列数").pack(side=tk.LEFT, padx=(12, 4))
+        self.parallel_count_combo = ttk.Combobox(
+            setting_frame,
+            values=self.parallel_count_values,
+            width=3,
+            state="readonly",
+            textvariable=self.parallel_count_var,
+        )
+        self.parallel_count_combo.pack(side=tk.LEFT)
+        self.parallel_count_combo.bind("<<ComboboxSelected>>", self._on_parallel_count_changed)
         ttk.Button(setting_frame, text="設定保存", command=self.save_settings).pack(side=tk.LEFT, padx=(16, 0))
 
         info_frame = ttk.Frame(self.root, padding=(12, 0, 12, 8))
@@ -79,7 +94,7 @@ class DesktopApp:
         table_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
 
         columns = ("行", "郵便番号", "住所", "状態", "判定結果")
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=20)
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=10)
         for col in columns:
             self.tree.heading(col, text=col)
 
@@ -94,12 +109,18 @@ class DesktopApp:
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.LEFT, fill=tk.Y)
 
-        log_frame = ttk.LabelFrame(self.root, text="監視ログ", padding=8)
-        log_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 12))
+        global_log_frame = ttk.LabelFrame(self.root, text="全体ログ", padding=8)
+        global_log_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 8))
 
-        self.log_text = tk.Text(log_frame, height=8, wrap=tk.WORD)
+        self.log_text = tk.Text(global_log_frame, height=6, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
         self.log_text.configure(state=tk.DISABLED)
+
+        worker_log_frame = ttk.LabelFrame(self.root, text="ワーカー別ログ（提供判定実行中）", padding=8)
+        worker_log_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 12))
+        self.worker_logs_container = ttk.Frame(worker_log_frame)
+        self.worker_logs_container.pack(fill=tk.BOTH, expand=True)
+        self._rebuild_worker_log_panels()
 
     def _load_settings_to_ui(self) -> None:
         browser_settings = load_browser_settings(SETTINGS_PATH)
@@ -181,6 +202,7 @@ class DesktopApp:
         self.result_label.set("提供判定を実行中...")
         self.progress_label.set(f"進捗: 0/{len(self.rows_data)}")
         self._append_log("提供判定を開始しました")
+        self._rebuild_worker_log_panels(clear_existing=True)
 
         self.worker_thread = threading.Thread(target=self._run_judgement, daemon=True)
         self.worker_thread.start()
@@ -198,6 +220,7 @@ class DesktopApp:
             rows_data=self.rows_data,
             event_queue=self.event_queue,
             stop_requested=lambda: self.stop_requested_flag,
+            parallel_count=self._get_parallel_count(),
         )
 
     def _drain_event_queue(self) -> None:
@@ -211,6 +234,8 @@ class DesktopApp:
                 self._update_row(payload)
             elif event == "log":
                 self._append_log(str(payload))
+            elif event == "worker_log":
+                self._append_worker_log(payload)
             elif event == "progress":
                 current, total = payload
                 self.progress_label.set(f"進捗: {current}/{total}")
@@ -246,12 +271,83 @@ class DesktopApp:
         self.select_button.configure(state=tk.DISABLED if is_running else tk.NORMAL)
         self.start_button.configure(state=tk.DISABLED if is_running else tk.NORMAL)
         self.stop_button.configure(state=tk.NORMAL if is_running else tk.DISABLED)
+        self.parallel_count_combo.configure(state=tk.DISABLED if is_running else "readonly")
+
+    def _on_parallel_count_changed(self, _event: object | None = None) -> None:
+        if self.running:
+            return
+        self._rebuild_worker_log_panels()
+
+    def _get_parallel_count(self) -> int:
+        value = self.parallel_count_var.get()
+        if value not in self.parallel_count_values:
+            return 2
+        return int(value)
+
+    def _rebuild_worker_log_panels(self, clear_existing: bool = False) -> None:
+        if self.worker_logs_container is None:
+            return
+
+        panel_count = self._get_parallel_count()
+        for child in self.worker_logs_container.winfo_children():
+            child.destroy()
+
+        self.worker_log_texts = []
+
+        columns = 2 if panel_count > 1 else 1
+        rows = (panel_count + columns - 1) // columns
+
+        for row_index in range(rows):
+            self.worker_logs_container.rowconfigure(row_index, weight=1)
+        for col_index in range(columns):
+            self.worker_logs_container.columnconfigure(col_index, weight=1)
+
+        for worker_index in range(panel_count):
+            row_index = worker_index // columns
+            col_index = worker_index % columns
+            panel = ttk.LabelFrame(self.worker_logs_container, text=f"ワーカー {worker_index + 1}", padding=6)
+            panel.grid(row=row_index, column=col_index, sticky="nsew", padx=4, pady=4)
+
+            panel.grid_rowconfigure(0, weight=1)
+            panel.grid_columnconfigure(0, weight=1)
+
+            text = tk.Text(panel, height=9, wrap=tk.WORD)
+            worker_scrollbar = ttk.Scrollbar(panel, orient=tk.VERTICAL, command=text.yview)
+            text.configure(yscrollcommand=worker_scrollbar.set)
+
+            text.grid(row=0, column=0, sticky="nsew")
+            worker_scrollbar.grid(row=0, column=1, sticky="ns")
+            text.configure(state=tk.DISABLED)
+
+            if clear_existing:
+                text.configure(state=tk.NORMAL)
+                text.delete("1.0", tk.END)
+                text.configure(state=tk.DISABLED)
+
+            self.worker_log_texts.append(text)
 
     def _append_log(self, message: str) -> None:
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.insert(tk.END, f"{message}\n")
         self.log_text.see(tk.END)
         self.log_text.configure(state=tk.DISABLED)
+
+    def _append_worker_log(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+
+        worker = payload.get("worker")
+        message = payload.get("message")
+        if not isinstance(worker, int) or not isinstance(message, str):
+            return
+        if worker < 0 or worker >= len(self.worker_log_texts):
+            return
+
+        target = self.worker_log_texts[worker]
+        target.configure(state=tk.NORMAL)
+        target.insert(tk.END, f"{message}\n")
+        target.see(tk.END)
+        target.configure(state=tk.DISABLED)
 
     def _clear_tree(self) -> None:
         for item in self.tree.get_children():

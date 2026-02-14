@@ -1,4 +1,5 @@
 import queue
+import threading
 from typing import Callable, Dict, List, Tuple
 
 from services.area_search import search_service_area
@@ -14,48 +15,92 @@ def run_judgement(
     rows_data: List[Dict[str, str]],
     event_queue: EventQueue,
     stop_requested: Callable[[], bool],
+    parallel_count: int = 1,
 ) -> None:
     failed_rows: List[int] = []
+    failed_rows_lock = threading.Lock()
+    processed_lock = threading.Lock()
     processed = 0
+    total = len(rows_data)
+
+    effective_parallel = max(1, min(int(parallel_count or 1), 4))
+
+    task_queue: queue.Queue[Dict[str, str]] = queue.Queue()
+    for row in rows_data:
+        task_queue.put(row)
 
     clear_cancel_flags()
 
-    for row in rows_data:
+    def process_row(row: Dict[str, str], worker_id: int) -> None:
+        nonlocal processed
+
         line_number = int(row["行"])
-        if stop_requested():
-            break
+
+        if row["状態"] == "空行":
+            row["判定結果"] = "スキップ"
+            with processed_lock:
+                processed += 1
+                current = processed
+            event_queue.put(("row", row.copy()))
+            event_queue.put(("progress", (current, total)))
+            return
 
         if row["状態"] != "OK":
             row["判定結果"] = "失敗"
-            failed_rows.append(line_number)
-            processed += 1
-            event_queue.put(("row", row.copy()))
-            event_queue.put(("progress", (processed, len(rows_data))))
-            continue
-
-        postal_code = row["郵便番号"]
-        address = row["住所"]
-        event_queue.put(("log", f"{line_number}行目を判定中: {postal_code} {address}"))
-
-        def progress_callback(message: str, row_no: int = line_number) -> None:
-            event_queue.put(("log", f"{row_no}行目: {message}"))
-
-        try:
-            clear_cancel_flags()
-            result = search_service_area(postal_code, address, progress_callback=progress_callback)
-            judgement = map_result(result if isinstance(result, dict) else {})
-            row["判定結果"] = judgement
-            if judgement == "失敗":
+            with failed_rows_lock:
                 failed_rows.append(line_number)
-        except Exception as exc:
-            row["判定結果"] = "失敗"
-            failed_rows.append(line_number)
-            event_queue.put(("log", f"{line_number}行目: エラー {exc}"))
+        else:
+            postal_code = row["郵便番号"]
+            address = row["住所"]
+            event_queue.put(("worker_log", {"worker": worker_id, "message": f"{line_number}行目を判定中: {postal_code} {address}"}))
 
-        processed += 1
+            def progress_callback(message: str, row_no: int = line_number) -> None:
+                event_queue.put(("worker_log", {"worker": worker_id, "message": f"{row_no}行目: {message}"}))
+
+            try:
+                result = search_service_area(postal_code, address, progress_callback=progress_callback)
+                judgement = map_result(result if isinstance(result, dict) else {})
+                row["判定結果"] = judgement
+                if judgement == "失敗":
+                    with failed_rows_lock:
+                        failed_rows.append(line_number)
+            except Exception as exc:
+                row["判定結果"] = "失敗"
+                with failed_rows_lock:
+                    failed_rows.append(line_number)
+                event_queue.put(("worker_log", {"worker": worker_id, "message": f"{line_number}行目: エラー {exc}"}))
+
+        with processed_lock:
+            processed += 1
+            current = processed
+
         event_queue.put(("row", row.copy()))
-        event_queue.put(("progress", (processed, len(rows_data))))
+        event_queue.put(("progress", (current, total)))
+
+    def worker_loop(worker_id: int) -> None:
+        while True:
+            if stop_requested():
+                return
+            try:
+                row = task_queue.get_nowait()
+            except queue.Empty:
+                return
+
+            try:
+                process_row(row, worker_id)
+            finally:
+                task_queue.task_done()
+
+    workers: List[threading.Thread] = []
+    for worker_id in range(effective_parallel):
+        thread = threading.Thread(target=worker_loop, args=(worker_id,), daemon=True)
+        workers.append(thread)
+        thread.start()
+
+    for thread in workers:
+        thread.join()
 
     cancelled = stop_requested()
-    event_queue.put(("done", {"failed_rows": failed_rows, "cancelled": cancelled}))
+    failed_rows_sorted = sorted(failed_rows)
+    event_queue.put(("done", {"failed_rows": failed_rows_sorted, "cancelled": cancelled}))
     clear_cancel_flags()

@@ -1,4 +1,5 @@
 from services.area_search import clear_cancel_flag as clear_cancel_flag_west
+from services.area_search import close_active_drivers as close_active_drivers_west
 from services.area_search import set_cancel_flag as set_cancel_flag_west
 from services import area_search_east
 
@@ -14,20 +15,15 @@ def request_cancel_service() -> None:
     except Exception:
         pass
 
-    for module in (None, area_search_east):
-        try:
-            driver = None
-            if module is None:
-                from services import area_search
+    try:
+        close_active_drivers_west()
+    except Exception:
+        pass
 
-                driver = getattr(area_search, "global_driver", None)
-            else:
-                driver = getattr(module, "global_driver", None)
-
-            if driver:
-                driver.quit()
-        except Exception:
-            pass
+    try:
+        area_search_east.close_active_drivers()
+    except Exception:
+        pass
 
 
 def clear_cancel_flags() -> None:
