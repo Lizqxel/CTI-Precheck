@@ -3,6 +3,8 @@ from typing import Dict
 
 INVESTIGATION_IMAGE_MESSAGE = "要手動再検索（住所をご確認ください）"
 INVESTIGATION_IMAGE_NOTE = "「住所を特定できないため、担当者がお調べします」の画像有"
+BUILDING_NG_NOTE = "建物選択で「該当する建物名がない」を選択して検索しています（建物NGの可能性があります）"
+GENERIC_RESEARCH_NOTE = "建物名や枝番の影響で自動判定できない場合があります。住所を確認して手動で再検索してください"
 
 
 def _append_unique(parts: list[str], value: str) -> None:
@@ -55,6 +57,10 @@ def extract_note(result: Dict[str, object]) -> str:
     message = str(result.get("message", "")).strip()
     if INVESTIGATION_IMAGE_MESSAGE in message:
         _append_unique(note_parts, INVESTIGATION_IMAGE_NOTE)
+
+    has_specific_note = INVESTIGATION_IMAGE_NOTE in note_parts or BUILDING_NG_NOTE in note_parts
+    if has_specific_note:
+        note_parts = [note for note in note_parts if note != GENERIC_RESEARCH_NOTE]
 
     if note_parts:
         return " / ".join(note_parts)

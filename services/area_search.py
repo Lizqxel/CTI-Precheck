@@ -581,7 +581,7 @@ def handle_building_selection(driver, progress_callback=None, show_popup=True, n
             if progress_callback:
                 progress_callback(f"建物選択モーダル: 「{selected_label}」を選択")
             if selected_label == "該当する建物名がない" and callable(note_callback):
-                note_callback("建物選択で「該当する建物名がない」を選択して検索しています")
+                note_callback("建物選択で「該当する建物名がない」を選択して検索しています（建物NGの可能性があります）")
 
             try:
                 WebDriverWait(driver, 5).until(
