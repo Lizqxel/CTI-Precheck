@@ -10,6 +10,8 @@ from core.cancellation import request_cancel_service
 from core.csv_processing import read_csv, validate_rows
 from core.judgement_runner import run_judgement
 from core.settings_store import SETTINGS_PATH, load_browser_settings, save_browser_settings
+from ui.update_manager import UpdateManager
+from version import APP_NAME, VERSION
 
 
 EventQueue = queue.Queue[Tuple[str, object]]
@@ -18,7 +20,7 @@ EventQueue = queue.Queue[Tuple[str, object]]
 class DesktopApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("提供判定CSVツール（デスクトップ版）")
+        self.root.title(f"提供判定CSVツール（デスクトップ版） - {APP_NAME} {VERSION}")
         self.root.geometry("1160x760")
 
         self.rows_data: List[Dict[str, str]] = []
@@ -41,12 +43,16 @@ class DesktopApp:
 
         self.worker_log_texts: List[tk.Text] = []
         self.worker_logs_container: ttk.Frame | None = None
+        self.update_manager = UpdateManager(root=self.root, log_callback=self._append_log)
 
         self._load_settings_to_ui()
         self._build_ui()
         self.root.after(150, self._drain_event_queue)
+        self.root.after(1000, self.check_for_updates_on_startup)
 
     def _build_ui(self) -> None:
+        self._build_menu()
+
         top_frame = ttk.Frame(self.root, padding=12)
         top_frame.pack(fill=tk.X)
 
@@ -96,6 +102,7 @@ class DesktopApp:
         self.parallel_count_combo.pack(side=tk.LEFT)
         self.parallel_count_combo.bind("<<ComboboxSelected>>", self._on_parallel_count_changed)
         ttk.Button(setting_frame, text="設定保存", command=self.save_settings).pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Button(setting_frame, text="更新チェック", command=self.check_for_updates_manual).pack(side=tk.LEFT, padx=(8, 0))
 
         info_frame = ttk.Frame(self.root, padding=(12, 0, 12, 8))
         info_frame.pack(fill=tk.X)
@@ -155,6 +162,23 @@ class DesktopApp:
         self.worker_logs_container = ttk.Frame(worker_log_frame)
         self.worker_logs_container.pack(fill=tk.BOTH, expand=True)
         self._rebuild_worker_log_panels()
+
+    def _build_menu(self) -> None:
+        menu_bar = tk.Menu(self.root)
+
+        help_menu = tk.Menu(menu_bar, tearoff=0)
+        help_menu.add_command(label="更新チェック", command=self.check_for_updates_manual)
+        help_menu.add_separator()
+        help_menu.add_command(label=f"バージョン: {VERSION}", state=tk.DISABLED)
+
+        menu_bar.add_cascade(label="ヘルプ", menu=help_menu)
+        self.root.configure(menu=menu_bar)
+
+    def check_for_updates_on_startup(self) -> None:
+        self.update_manager.check_for_updates(interactive=False, auto=True)
+
+    def check_for_updates_manual(self) -> None:
+        self.update_manager.check_for_updates(interactive=True, auto=False)
 
     def _load_settings_to_ui(self) -> None:
         browser_settings = load_browser_settings(SETTINGS_PATH)
