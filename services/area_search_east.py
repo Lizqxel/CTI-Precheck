@@ -1028,7 +1028,7 @@ def handle_address_number_input(driver, address_parts, progress_callback=None):
                             "details": {
                                 "判定結果": "判定失敗",
                                 "提供エリア": "調査が必要なエリアです",
-                                "備考": "住所を特定できないため、担当者がお調べします"
+                                "備考": "住所を特定できないため、担当者がお調べします / 「住所を特定できないため、担当者がお調べします」の画像有"
                             },
                             "screenshot": screenshot_path,
                             "show_popup": show_popup

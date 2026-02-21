@@ -1,6 +1,24 @@
 from typing import Dict
 
 
+INVESTIGATION_IMAGE_MESSAGE = "要手動再検索（住所をご確認ください）"
+INVESTIGATION_IMAGE_NOTE = "「住所を特定できないため、担当者がお調べします」の画像有"
+
+
+def _append_unique(parts: list[str], value: str) -> None:
+    normalized = (value or "").strip()
+    if not normalized:
+        return
+
+    segments = [segment.strip() for segment in normalized.split("/") if segment.strip()]
+    if not segments:
+        return
+
+    for segment in segments:
+        if segment not in parts:
+            parts.append(segment)
+
+
 def map_result(result: Dict[str, object]) -> str:
     status = str(result.get("status", "")).lower()
     message = str(result.get("message", ""))
@@ -23,16 +41,22 @@ def map_result(result: Dict[str, object]) -> str:
 
 
 def extract_note(result: Dict[str, object]) -> str:
-    search_notes = result.get("search_notes")
-    if isinstance(search_notes, list):
-        merged = " / ".join(str(item).strip() for item in search_notes if str(item).strip())
-        if merged:
-            return merged
+    note_parts: list[str] = []
 
     details = result.get("details")
     if isinstance(details, dict):
-        note = str(details.get("備考", "")).strip()
-        if note:
-            return note
+        _append_unique(note_parts, str(details.get("備考", "")))
+
+    search_notes = result.get("search_notes")
+    if isinstance(search_notes, list):
+        for item in search_notes:
+            _append_unique(note_parts, str(item))
+
+    message = str(result.get("message", "")).strip()
+    if INVESTIGATION_IMAGE_MESSAGE in message:
+        _append_unique(note_parts, INVESTIGATION_IMAGE_NOTE)
+
+    if note_parts:
+        return " / ".join(note_parts)
 
     return ""
