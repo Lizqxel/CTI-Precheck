@@ -581,7 +581,7 @@ def handle_building_selection(driver, progress_callback=None, show_popup=True, n
             if progress_callback:
                 progress_callback(f"建物選択モーダル: 「{selected_label}」を選択")
             if selected_label == "該当する建物名がない" and callable(note_callback):
-                note_callback("建物選択で「該当する建物名がない」を選択して検索しています")
+                note_callback("建物選択で「該当する建物名がない」を選択して検索しています（建物NGの可能性があります）")
 
             try:
                 WebDriverWait(driver, 5).until(
@@ -962,6 +962,8 @@ def search_service_area_west(postal_code, address, progress_callback=None):
     final_search_clicked_early = False
     prefetched_final_search_button = None
     number_dialog_wait_timeout = 15
+    banchi_dialog_displayed = False
+    gou_dialog_displayed = False
     number_prefix = address_parts.get('number_prefix')
     number_suffix = address_parts.get('number_suffix')
     if address_parts['number']:
@@ -1353,6 +1355,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                         raise
 
                 logging.info("番地入力ダイアログが表示されました")
+                banchi_dialog_displayed = True
                 
                 # 番地がない場合は「番地なし」を選択
                 if not street_number:
@@ -1714,6 +1717,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
 
                 current_number_dialog_id = number_wait_result[1]
                 logging.info(f"号入力ダイアログが表示されました: {current_number_dialog_id}")
+                gou_dialog_displayed = True
                 
                 # 号を入力
                 input_building_number = building_number
@@ -2000,7 +2004,18 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                 
             except TimeoutException:
                 logging.info("号入力画面はスキップされました")
-                if (not final_search_clicked_early) and (banchi_stage_pending or street_number or building_number or number_suffix):
+                logging.info(
+                    f"号入力スキップ時フラグ: final_search_clicked_early={final_search_clicked_early}, "
+                    f"banchi_dialog_displayed={banchi_dialog_displayed}, gou_dialog_displayed={gou_dialog_displayed}, "
+                    f"banchi_stage_pending={banchi_stage_pending}, street_number={street_number}, "
+                    f"building_number={building_number}, number_suffix={number_suffix}"
+                )
+                if (
+                    (not final_search_clicked_early)
+                    and (not banchi_dialog_displayed)
+                    and (not gou_dialog_displayed)
+                    and (banchi_stage_pending or street_number or building_number or number_suffix)
+                ):
                     add_search_note("番地・号入力モーダルが表示されない住所のため、基本住所のまま検索結果を確認しています")
             
             # 建物選択モーダルの処理
@@ -2124,7 +2139,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
                             "details": {
                                 "判定結果": "要手動再検索",
                                 "提供エリア": "調査が必要なエリアです",
-                                "備考": "建物名や枝番の影響で自動判定できない場合があります。住所を確認して手動で再検索してください"
+                                "備考": "建物名や枝番の影響で自動判定できない場合があります。住所を確認して手動で再検索してください / 「住所を特定できないため、担当者がお調べします」の画像有"
                             }
                         },
                         "not_provided": {

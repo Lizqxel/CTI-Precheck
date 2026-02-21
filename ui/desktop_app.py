@@ -26,8 +26,8 @@ class DesktopApp:
         self.rows_data: List[Dict[str, str]] = []
         self.event_queue: EventQueue = queue.Queue()
         self.worker_thread: threading.Thread | None = None
+        self.current_stop_event: threading.Event | None = None
         self.running = False
-        self.stop_requested_flag = False
 
         self.total_label = tk.StringVar(value="総行数: 0")
         self.file_label = tk.StringVar(value="未選択")
@@ -360,7 +360,10 @@ class DesktopApp:
         total_targets = len(self.rows_data) if target_lines is None else len(target_lines)
 
         self.save_settings()
-        self.stop_requested_flag = False
+        run_queue: EventQueue = queue.Queue()
+        run_stop_event = threading.Event()
+        self.event_queue = run_queue
+        self.current_stop_event = run_stop_event
         self.running = True
         self._set_running_ui_state(True)
         self.result_label.set("提供判定を実行中...")
@@ -368,22 +371,41 @@ class DesktopApp:
         self._append_log("提供判定を開始しました")
         self._rebuild_worker_log_panels(clear_existing=True)
 
-        self.worker_thread = threading.Thread(target=self._run_judgement, args=(target_lines,), daemon=True)
+        self.worker_thread = threading.Thread(
+            target=self._run_judgement,
+            args=(target_lines, run_queue, run_stop_event),
+            daemon=True,
+        )
         self.worker_thread.start()
 
     def stop_judgement(self) -> None:
         if not self.running:
             return
-        self.stop_requested_flag = True
-        self._append_log("停止要求を受け付けました")
-        self.result_label.set("停止処理中...")
-        request_cancel_service()
 
-    def _run_judgement(self, target_lines: Optional[Set[int]] = None) -> None:
+        if self.current_stop_event is not None:
+            self.current_stop_event.set()
+
+        self._append_log("停止要求を受け付けました（即時終了）")
+        self.running = False
+        self._set_running_ui_state(False)
+        self.result_label.set("提供判定を停止しました")
+        self.progress_label.set("進捗: 停止")
+        request_cancel_service()
+        self.event_queue = queue.Queue()
+        self.current_stop_event = None
+
+    def _run_judgement(
+        self,
+        target_lines: Optional[Set[int]] = None,
+        run_queue: Optional[EventQueue] = None,
+        run_stop_event: Optional[threading.Event] = None,
+    ) -> None:
+        active_queue = run_queue if run_queue is not None else self.event_queue
+        active_stop_event = run_stop_event if run_stop_event is not None else threading.Event()
         run_judgement(
             rows_data=self.rows_data,
-            event_queue=self.event_queue,
-            stop_requested=lambda: self.stop_requested_flag,
+            event_queue=active_queue,
+            stop_requested=active_stop_event.is_set,
             parallel_count=self._get_parallel_count(),
             target_lines=target_lines,
         )
