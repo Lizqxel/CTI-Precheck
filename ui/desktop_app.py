@@ -587,12 +587,53 @@ class DesktopApp:
             return
         self.main_canvas.itemconfigure(self.main_canvas_window_id, width=event.width)
 
+    def _is_widget_or_descendant(self, widget: tk.Misc | None, ancestor: tk.Misc | None) -> bool:
+        if widget is None or ancestor is None:
+            return False
+
+        current: tk.Misc | None = widget
+        while current is not None:
+            if current == ancestor:
+                return True
+            current = getattr(current, "master", None)
+
+        return False
+
+    def _is_inner_scrollable_area(self, widget: tk.Misc | None) -> bool:
+        if widget is None:
+            return False
+
+        if self._is_widget_or_descendant(widget, self.tree):
+            return True
+        if self._is_widget_or_descendant(widget, self.note_text):
+            return True
+        if self._is_widget_or_descendant(widget, self.log_text):
+            return True
+
+        for worker_text in self.worker_log_texts:
+            if self._is_widget_or_descendant(widget, worker_text):
+                return True
+
+        return False
+
     def _on_main_mousewheel(self, event: tk.Event) -> None:
         if self.main_canvas is None:
             return
+
+        widget = getattr(event, "widget", None)
+        if isinstance(widget, tk.Misc) and self._is_inner_scrollable_area(widget):
+            return
+
         delta = int(getattr(event, "delta", 0) or 0)
         if delta == 0:
             return
+
+        first, last = self.main_canvas.yview()
+        if delta > 0 and first <= 0.0:
+            return
+        if delta < 0 and last >= 1.0:
+            return
+
         self.main_canvas.yview_scroll(int(-delta / 120), "units")
 
     def _rebuild_worker_log_panels(self, clear_existing: bool = False) -> None:
