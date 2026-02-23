@@ -1,5 +1,6 @@
 import csv
 import queue
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -51,6 +52,8 @@ class DesktopApp:
 
         self._load_settings_to_ui()
         self._build_ui()
+        self._try_restore_autosave_on_startup()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close_requested)
         self.root.after(150, self._drain_event_queue)
         self.root.after(1000, self.check_for_updates_on_startup)
 
@@ -301,6 +304,56 @@ class DesktopApp:
                 f"次の行に入力不備があります: {', '.join(map(str, invalid_line_numbers))}",
             )
 
+    def _try_restore_autosave_on_startup(self) -> None:
+        autosave_path = self._get_autosave_path()
+        if not autosave_path.exists():
+            return
+
+        should_restore = messagebox.askyesno(
+            "前回進捗の復元",
+            f"前回の自動保存データが見つかりました。\n復元しますか？\n\n{autosave_path.name}",
+        )
+        if not should_restore:
+            self._append_log("前回進捗の自動復元をキャンセルしました")
+            return
+
+        try:
+            rows = read_csv(autosave_path)
+        except Exception as exc:
+            self._append_log(f"自動保存CSVの読み込みに失敗しました: {exc}")
+            return
+
+        if not rows:
+            return
+
+        parsed_rows, invalid_line_numbers = validate_rows(rows)
+        if not parsed_rows:
+            return
+
+        for index, parsed in enumerate(parsed_rows):
+            source = rows[index] if index < len(rows) else []
+            result_value = source[2].strip() if len(source) >= 3 and source[2] is not None else ""
+            note_value = source[3].strip() if len(source) >= 4 and source[3] is not None else ""
+            if result_value:
+                parsed["判定結果"] = result_value
+            if note_value:
+                parsed["備考"] = note_value
+
+        self.rows_data = parsed_rows
+        self._render_rows(self.rows_data)
+        self.execution_target_line = None
+        self.target_line_var.set("対象行: 未選択")
+        self.run_scope_var.set("全行")
+
+        self.file_label.set(f"自動復元: {autosave_path.name}")
+        self.total_label.set(f"総行数: {len(self.rows_data)}")
+        self.result_label.set("前回の進捗を自動読み込みしました")
+        self.progress_label.set("進捗: -")
+        self._append_log(f"前回の進捗を自動読み込みしました: {autosave_path}")
+
+        if invalid_line_numbers:
+            self._append_log(f"自動復元データに入力不備の行があります: {', '.join(map(str, invalid_line_numbers))}")
+
     def _resolve_target_lines(self) -> Optional[Set[int]]:
         scope = self.run_scope_var.get().strip()
         if scope == "全行":
@@ -324,6 +377,14 @@ class DesktopApp:
     def _set_execution_target_line(self, line_number: int) -> None:
         self.execution_target_line = line_number
         self.target_line_var.set(f"対象行: {line_number}")
+
+    def _find_first_unfinished_line(self) -> Optional[int]:
+        for row in self.rows_data:
+            line_number = int(row.get("行", "0") or "0")
+            result = str(row.get("判定結果", "") or "")
+            if result in ("未実行", "停止"):
+                return line_number
+        return None
 
     def set_target_from_selection(self) -> None:
         selected = self.tree.selection()
@@ -375,6 +436,25 @@ class DesktopApp:
         if not self.rows_data:
             messagebox.showwarning("未読み込み", "先にCSVファイルを選択してください。")
             return
+
+        current_scope = self.run_scope_var.get().strip()
+        if current_scope == "全行":
+            resume_line = self._find_first_unfinished_line()
+            if resume_line is not None and resume_line > 1:
+                should_resume = messagebox.askyesno(
+                    "実行範囲の確認",
+                    f"{resume_line}行目以降に未実行データがあります。\n途中から再開しますか？\n\n"
+                    "[はい] 未実行の先頭行以降を実行\n"
+                    "[いいえ] 1行目から全行を実行",
+                )
+                if should_resume:
+                    self._set_execution_target_line(resume_line)
+                    self.run_scope_var.set("選択行以降")
+                    self._append_log(f"未実行先頭の {resume_line} 行目から再開します")
+
+        if self.execution_target_line is not None and self.run_scope_var.get().strip() == "全行":
+            self.run_scope_var.set("選択行以降")
+            self._append_log(f"対象行 {self.execution_target_line} が設定済みのため、実行範囲を『選択行以降』に変更しました")
 
         target_lines = self._resolve_target_lines()
         if target_lines is not None and len(target_lines) == 0:
@@ -628,6 +708,37 @@ class DesktopApp:
             self.note_text.insert(tk.END, note)
         self.note_text.configure(state=tk.DISABLED)
 
+    def _on_close_requested(self) -> None:
+        self._auto_save_result_csv()
+        self.root.destroy()
+
+    def _get_runtime_base_dir(self) -> Path:
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve().parent
+        return Path(__file__).resolve().parents[1]
+
+    def _get_autosave_path(self) -> Path:
+        return self._get_runtime_base_dir() / "result_autosave.csv"
+
+    def _write_result_csv(self, save_path: Path) -> None:
+        with save_path.open("w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            for row in self.rows_data:
+                result_value = row.get("判定結果", "未実行")
+                note_value = row.get("備考", "")
+                writer.writerow([row["郵便番号"], row["住所"], result_value, note_value])
+
+    def _auto_save_result_csv(self) -> None:
+        if not self.rows_data:
+            return
+
+        save_path = self._get_autosave_path()
+        try:
+            self._write_result_csv(save_path)
+            self._append_log(f"終了時に結果CSVを自動保存しました: {save_path}")
+        except Exception as exc:
+            self._append_log(f"終了時CSV自動保存に失敗しました: {exc}")
+
     def save_result_csv(self) -> None:
         if not self.rows_data:
             messagebox.showwarning("未読み込み", "先にCSVファイルを読み込んでください。")
@@ -643,12 +754,7 @@ class DesktopApp:
             return
 
         save_path = Path(selected)
-        with save_path.open("w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f)
-            for row in self.rows_data:
-                result_value = row.get("判定結果", "未実行")
-                note_value = row.get("備考", "")
-                writer.writerow([row["郵便番号"], row["住所"], result_value, note_value])
+        self._write_result_csv(save_path)
 
         self.result_label.set(f"結果CSV保存: {save_path.name}")
         self._append_log(f"結果CSVを保存しました: {save_path}")
