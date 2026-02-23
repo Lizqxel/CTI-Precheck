@@ -25,7 +25,7 @@ def run_judgement(
     processed = 0
     total = len(rows_data) if target_lines is None else len(target_lines)
 
-    effective_parallel = max(1, min(int(parallel_count or 1), 4))
+    effective_parallel = max(1, min(int(parallel_count or 1), 8))
 
     task_queue: queue.Queue[Dict[str, str]] = queue.Queue()
     for row in rows_data:
