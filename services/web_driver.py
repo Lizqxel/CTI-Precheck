@@ -19,6 +19,51 @@ _DRIVER_PATH_LOCK = threading.Lock()
 _CACHED_DRIVER_PATH = None
 
 
+def _apply_render_optimizations(driver, aggressive_blocking: bool = True) -> None:
+    try:
+        driver.execute_cdp_cmd("Network.enable", {})
+    except Exception:
+        return
+
+    if aggressive_blocking:
+        blocked_patterns = [
+            "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.svg", "*.ico",
+            "*.woff", "*.woff2", "*.ttf", "*.otf",
+            "*.mp4", "*.webm", "*.mp3", "*.m4a", "*.wav",
+            "data:image/*",
+        ]
+        try:
+            driver.execute_cdp_cmd("Network.setBlockedURLs", {"urls": blocked_patterns})
+        except Exception:
+            pass
+
+    animation_killer_script = """
+        (() => {
+            try {
+                const style = document.createElement('style');
+                style.id = '__cti_render_light_style';
+                style.textContent = `
+                    *, *::before, *::after {
+                        animation: none !important;
+                        transition: none !important;
+                        caret-color: transparent !important;
+                    }
+                    html { scroll-behavior: auto !important; }
+                `;
+                document.documentElement.appendChild(style);
+            } catch (e) {}
+        })();
+    """
+
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": animation_killer_script},
+        )
+    except Exception:
+        pass
+
+
 def _resolve_chromedriver_path() -> str:
     global _CACHED_DRIVER_PATH
     if _CACHED_DRIVER_PATH:
@@ -51,6 +96,7 @@ def create_driver(headless=False):
         
         browser_settings = load_browser_settings()
         disable_images = bool(browser_settings.get("disable_images", True))
+        aggressive_resource_blocking = bool(browser_settings.get("aggressive_resource_blocking", True))
         page_load_strategy = str(browser_settings.get("page_load_strategy", "eager")).strip().lower() or "eager"
         if page_load_strategy not in {"normal", "eager", "none"}:
             page_load_strategy = "eager"
@@ -127,6 +173,7 @@ def create_driver(headless=False):
         # タイムアウト設定
         driver.set_page_load_timeout(60)
         driver.implicitly_wait(0)
+        _apply_render_optimizations(driver, aggressive_blocking=aggressive_resource_blocking)
         
         return driver
         
@@ -146,6 +193,7 @@ def load_browser_settings():
         "page_load_timeout": 30,
         "script_timeout": 30,
         "disable_images": True,
+        "aggressive_resource_blocking": True,
         "show_popup": False,
         "auto_close": False
     }
@@ -155,13 +203,16 @@ def load_browser_settings():
             with open("settings.json", "r", encoding="utf-8") as f:
                 settings = json.load(f)
                 # ブラウザ設定が含まれていない場合はデフォルト値を使用
-                browser_settings = settings.get("browser_settings", default_settings)
+                browser_settings = settings.get("browser_settings", {})
+                merged_settings = dict(default_settings)
+                if isinstance(browser_settings, dict):
+                    merged_settings.update(browser_settings)
                 
                 # auto_closeが設定に含まれていない場合はデフォルト値を使用
-                if "auto_close" not in browser_settings:
-                    browser_settings["auto_close"] = default_settings["auto_close"]
+                if "auto_close" not in merged_settings:
+                    merged_settings["auto_close"] = default_settings["auto_close"]
                     
-                return browser_settings
+                return merged_settings
     except Exception as e:
         logging.warning(f"ブラウザ設定の読み込みに失敗しました: {str(e)}")
     

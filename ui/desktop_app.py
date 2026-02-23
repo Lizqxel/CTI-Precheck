@@ -250,6 +250,7 @@ class DesktopApp:
             "page_load_timeout": 60,
             "script_timeout": 60,
             "disable_images": True,
+            "aggressive_resource_blocking": True,
             "page_load_strategy": "eager",
         }
 
