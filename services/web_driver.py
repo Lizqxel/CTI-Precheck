@@ -8,13 +8,27 @@ WebDriverの作成と管理を行うモジュール
 import logging
 import json
 import os
-import time
-import sys
+import threading
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
+
+
+_DRIVER_PATH_LOCK = threading.Lock()
+_CACHED_DRIVER_PATH = None
+
+
+def _resolve_chromedriver_path() -> str:
+    global _CACHED_DRIVER_PATH
+    if _CACHED_DRIVER_PATH:
+        return _CACHED_DRIVER_PATH
+
+    with _DRIVER_PATH_LOCK:
+        if _CACHED_DRIVER_PATH:
+            return _CACHED_DRIVER_PATH
+        _CACHED_DRIVER_PATH = ChromeDriverManager().install()
+        return _CACHED_DRIVER_PATH
 
 
 def create_driver(headless=False):
@@ -35,10 +49,18 @@ def create_driver(headless=False):
         except (ImportError, NameError):
             pass  # area_searchモジュールが利用できない場合はスキップ
         
+        browser_settings = load_browser_settings()
+        disable_images = bool(browser_settings.get("disable_images", True))
+        page_load_strategy = str(browser_settings.get("page_load_strategy", "eager")).strip().lower() or "eager"
+        if page_load_strategy not in {"normal", "eager", "none"}:
+            page_load_strategy = "eager"
+
         # Chromeオプションの設定
         chrome_options = Options()
+        chrome_options.page_load_strategy = page_load_strategy
+
         if headless:
-            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-gpu')
@@ -51,14 +73,28 @@ def create_driver(headless=False):
         chrome_options.add_argument('--disable-web-security')
         chrome_options.add_argument('--ignore-certificate-errors')
         chrome_options.add_argument('--ignore-ssl-errors')
-        chrome_options.add_argument('--start-maximized')
-        chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument('--disable-background-networking')
+        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
+        chrome_options.add_argument('--disable-renderer-backgrounding')
+        chrome_options.add_argument('--disable-component-update')
+        chrome_options.add_argument('--metrics-recording-only')
+        chrome_options.add_argument('--mute-audio')
+        chrome_options.add_argument('--no-first-run')
+        chrome_options.add_argument('--no-default-browser-check')
+        chrome_options.add_argument('--password-store=basic')
+        chrome_options.add_argument('--window-size=1280,720')
+        chrome_options.add_argument('--log-level=3')
+
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
         
-        # 画像を無効化
         prefs = {
-            'profile.managed_default_content_settings.images': 2,
-            'profile.default_content_setting_values.images': 2
+            'profile.default_content_setting_values.notifications': 2,
+            'profile.default_content_setting_values.geolocation': 2,
         }
+        if disable_images:
+            prefs['profile.managed_default_content_settings.images'] = 2
+            prefs['profile.default_content_setting_values.images'] = 2
         chrome_options.add_experimental_option('prefs', prefs)
         
         # キャンセルチェック（オプション設定後）
@@ -68,9 +104,8 @@ def create_driver(headless=False):
         except (ImportError, NameError):
             pass
         
-        # ChromeDriverManagerの設定
-        driver_manager = ChromeDriverManager()
-        service = Service(driver_manager.install())
+        # ChromeDriverManagerの設定（解決結果をキャッシュ）
+        service = Service(_resolve_chromedriver_path())
         
         # キャンセルチェック（ドライバー起動直前）
         try:
@@ -91,7 +126,7 @@ def create_driver(headless=False):
         
         # タイムアウト設定
         driver.set_page_load_timeout(60)
-        driver.implicitly_wait(10)
+        driver.implicitly_wait(0)
         
         return driver
         

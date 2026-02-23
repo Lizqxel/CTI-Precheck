@@ -10,6 +10,8 @@ DEFAULT_BROWSER_SETTINGS: Dict[str, Any] = {
     "auto_close": True,
     "page_load_timeout": 60,
     "script_timeout": 60,
+    "disable_images": True,
+    "page_load_strategy": "eager",
 }
 
 DEFAULT_UPDATE_SETTINGS: Dict[str, Any] = {

@@ -32,7 +32,7 @@ from selenium import webdriver
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-from services.web_driver import create_driver, load_browser_settings
+from services.web_driver import create_driver as create_shared_driver, load_browser_settings
 from utils.string_utils import normalize_string, calculate_similarity
 from utils.address_utils import normalize_address
 from services.area_search import take_full_page_screenshot, check_cancellation, CancellationError
@@ -359,36 +359,7 @@ def create_driver(headless=False):
     Returns:
         WebDriver: 作成されたドライバーインスタンス
     """
-    try:
-        options = webdriver.ChromeOptions()
-        
-        if headless:
-            options.add_argument('--headless=new')
-            # ヘッドレスモード用の追加設定
-            options.add_argument('--disable-gpu')
-            options.add_argument('--no-sandbox')
-            options.add_argument('--disable-dev-shm-usage')
-            options.add_argument('--disable-software-rasterizer')
-            
-        # 共通の最適化設定
-        options.add_argument('--window-size=800,600')
-        options.add_argument('--disable-extensions')
-        options.add_argument('--disable-infobars')
-        options.add_argument('--disable-notifications')
-        options.add_argument('--disable-popup-blocking')
-        
-        # メモリ使用量の最適化
-        options.add_argument('--disable-application-cache')
-        options.add_argument('--aggressive-cache-discard')
-        options.add_argument('--disable-default-apps')
-        
-        driver = webdriver.Chrome(options=options)
-        logging.info(f"Chromeドライバーを作成しました（ヘッドレスモード: {headless}）")
-        
-        return driver
-    except Exception as e:
-        logging.error(f"ドライバーの作成に失敗: {str(e)}")
-        raise
+    return create_shared_driver(headless=headless)
     
 def search_service_area(postal_code, address, progress_callback=None):
     """
@@ -1075,4 +1046,18 @@ def handle_address_number_input(driver, address_parts, progress_callback=None):
     except Exception as e:
         logging.error(f"番地入力画面の処理中にエラー: {str(e)}")
         debug_page_state(driver, "エラー発生時の状態")
-        raise 
+        raise
+    finally:
+        if driver:
+            if auto_close:
+                try:
+                    driver.quit()
+                    unregister_active_driver(driver)
+                    global_driver = None
+                    logging.info("ブラウザを自動終了しました")
+                except Exception as close_error:
+                    logging.warning(f"ブラウザの終了中にエラー: {str(close_error)}")
+                    global_driver = driver
+            else:
+                logging.info("ブラウザウィンドウを維持します - 手動で閉じてください")
+                global_driver = driver

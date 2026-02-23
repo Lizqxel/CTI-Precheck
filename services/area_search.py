@@ -31,7 +31,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium import webdriver
 from PIL import Image  # PILライブラリを追加
 
-from services.web_driver import create_driver, load_browser_settings
+from services.web_driver import create_driver as create_shared_driver, load_browser_settings
 from utils.string_utils import normalize_string, calculate_similarity
 from utils.address_utils import split_address, normalize_address
 
@@ -624,40 +624,7 @@ def create_driver(headless=False):
     Returns:
         WebDriver: 作成されたドライバーインスタンス
     """
-    try:
-        options = webdriver.ChromeOptions()
-        
-        if headless:
-            options.add_argument('--headless=new')
-            # ヘッドレスモード用の追加設定
-            options.add_argument('--disable-gpu')
-            options.add_argument('--no-sandbox')
-            options.add_argument('--disable-dev-shm-usage')
-            options.add_argument('--disable-software-rasterizer')
-            
-        # 共通の最適化設定
-        options.add_argument('--window-size=800,600')
-        options.add_argument('--disable-extensions')
-        options.add_argument('--disable-infobars')
-        options.add_argument('--disable-notifications')
-        options.add_argument('--disable-popup-blocking')
-        options.add_argument('--log-level=3')
-        options.add_argument('--silent')
-        options.add_argument('--disable-features=OptimizationGuideModelDownloading,OptimizationHints,OptimizationTargetPrediction,OptimizationGuideOnDeviceModel')
-        options.add_experimental_option('excludeSwitches', ['enable-logging'])
-        
-        # メモリ使用量の最適化
-        options.add_argument('--disable-application-cache')
-        options.add_argument('--aggressive-cache-discard')
-        options.add_argument('--disable-default-apps')
-        
-        driver = webdriver.Chrome(options=options)
-        logging.info(f"Chromeドライバーを作成しました（ヘッドレスモード: {headless}）")
-        
-        return driver
-    except Exception as e:
-        logging.error(f"ドライバーの作成に失敗: {str(e)}")
-        raise
+    return create_shared_driver(headless=headless)
 
 # --- 追加: 設定読み込みとスクリーンショットの有効/無効ラッパ ---
 def _load_browser_settings(path="settings.json"):
@@ -2188,7 +2155,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
 
                     # 検索結果画像は遷移直後に遅れて表示されるため、短周期で一括ポーリング
                     detection_timeout_sec = 10
-                    detection_interval_sec = 0.25
+                    detection_interval_sec = 0.5
                     deadline = time.time() + detection_timeout_sec
 
                     while time.time() < deadline and not found_pattern:
@@ -2369,6 +2336,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
             if auto_close:
                 try:
                     driver.quit()
+                    unregister_active_driver(driver)
                     global_driver = None
                     logging.info("ブラウザを自動終了しました")
                 except Exception as close_error:

@@ -249,6 +249,8 @@ class DesktopApp:
             "auto_close": True,
             "page_load_timeout": 60,
             "script_timeout": 60,
+            "disable_images": True,
+            "page_load_strategy": "eager",
         }
 
     def save_settings(self) -> None:
