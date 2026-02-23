@@ -361,7 +361,7 @@ def create_driver(headless=False):
     """
     return create_shared_driver(headless=headless)
     
-def search_service_area(postal_code, address, progress_callback=None):
+def search_service_area(postal_code, address, progress_callback=None, shared_driver=None):
     """
     NTT東日本の提供エリア検索を実行する関数
     
@@ -467,18 +467,24 @@ def search_service_area(postal_code, address, progress_callback=None):
     
     logging.info(f"ブラウザ設定 - ヘッドレス: {headless_mode}, ポップアップ表示: {show_popup}, 自動終了: {auto_close}")
     
-    driver = None
+    driver = shared_driver
+    borrowed_driver = driver is not None
     try:
-        # ブラウザを起動
-        if progress_callback:
-            progress_callback("ブラウザを起動中...")
-        
-        driver = create_driver(
-            headless=headless_mode
-        )
-        
-        # ブラウザ起動後のキャンセルチェック
-        check_cancellation()
+        if borrowed_driver:
+            if progress_callback:
+                progress_callback("既存ブラウザを再利用中...")
+            logging.info("既存ブラウザを再利用します")
+        else:
+            # ブラウザを起動
+            if progress_callback:
+                progress_callback("ブラウザを起動中...")
+
+            driver = create_driver(
+                headless=headless_mode
+            )
+
+            # ブラウザ起動後のキャンセルチェック
+            check_cancellation()
         
         # グローバル変数に保存
         global_driver = driver
@@ -1048,7 +1054,7 @@ def handle_address_number_input(driver, address_parts, progress_callback=None):
         debug_page_state(driver, "エラー発生時の状態")
         raise
     finally:
-        if driver:
+        if driver and not borrowed_driver:
             if auto_close:
                 try:
                     driver.quit()

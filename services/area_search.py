@@ -771,7 +771,7 @@ def take_full_page_screenshot(driver, save_path):
     """互換ラッパ: settings の enable_screenshots を見て実行/スキップする"""
     return take_screenshot_if_enabled(driver, save_path)
 
-def search_service_area(postal_code, address, progress_callback=None):
+def search_service_area(postal_code, address, progress_callback=None, shared_driver=None):
     """
     提供エリア検索を実行する関数
     
@@ -788,12 +788,12 @@ def search_service_area(postal_code, address, progress_callback=None):
         logging.info("東日本の提供エリア検索を実行します")
         # 東日本の検索機能を動的にインポート
         from services.area_search_east import search_service_area as search_service_area_east
-        return search_service_area_east(postal_code, address, progress_callback)
+        return search_service_area_east(postal_code, address, progress_callback, shared_driver=shared_driver)
     else:
         logging.info("西日本の提供エリア検索を実行します")
-        return search_service_area_west(postal_code, address, progress_callback)
+        return search_service_area_west(postal_code, address, progress_callback, shared_driver=shared_driver)
 
-def search_service_area_west(postal_code, address, progress_callback=None):
+def search_service_area_west(postal_code, address, progress_callback=None, shared_driver=None):
     """
     NTT西日本の提供エリア検索を実行する関数
     
@@ -975,19 +975,25 @@ def search_service_area_west(postal_code, address, progress_callback=None):
     
     logging.info(f"ブラウザ設定 - ヘッドレス: {headless_mode}, ポップアップ表示: {show_popup}, 自動終了: {auto_close}")
     
-    driver = None
+    driver = shared_driver
+    borrowed_driver = driver is not None
     try:
         # ドライバー作成前にキャンセルチェック（最速対応）
         check_cancellation()
-        
-        if progress_callback:
-            progress_callback("ブラウザを起動中...")
-        
-        # ドライバーを作成してサイトを開く
-        driver = create_driver(headless=headless_mode)
-        
-        # ドライバー作成直後にキャンセルチェック
-        check_cancellation()
+
+        if borrowed_driver:
+            if progress_callback:
+                progress_callback("既存ブラウザを再利用中...")
+            logging.info("既存ブラウザを再利用します")
+        else:
+            if progress_callback:
+                progress_callback("ブラウザを起動中...")
+
+            # ドライバーを作成してサイトを開く
+            driver = create_driver(headless=headless_mode)
+
+            # ドライバー作成直後にキャンセルチェック
+            check_cancellation()
         
         # グローバル変数に保存
         global_driver = driver
@@ -2332,7 +2338,7 @@ def search_service_area_west(postal_code, address, progress_callback=None):
         })
     
     finally:
-        if driver:
+        if driver and not borrowed_driver:
             if auto_close:
                 try:
                     driver.quit()

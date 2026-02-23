@@ -4,9 +4,11 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from services.area_search import CancellationError
 from services.area_search import search_service_area
+from services.web_driver import create_driver
 
 from core.cancellation import clear_cancel_flags
 from core.result_mapping import extract_note, map_result
+from core.settings_store import SETTINGS_PATH, load_browser_settings
 
 
 EventQueue = queue.Queue[Tuple[str, object]]
@@ -36,7 +38,35 @@ def run_judgement(
 
     clear_cancel_flags()
 
-    def process_row(row: Dict[str, str], worker_id: int) -> None:
+    def worker_loop(worker_id: int) -> None:
+        worker_driver = None
+        browser_settings = load_browser_settings(SETTINGS_PATH)
+        headless_mode = bool(browser_settings.get("headless", True))
+
+        while True:
+            if stop_requested():
+                break
+            try:
+                row = task_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            try:
+                if worker_driver is None:
+                    event_queue.put(("worker_log", {"worker": worker_id, "message": "ワーカー専用ブラウザを起動中..."}))
+                    worker_driver = create_driver(headless=headless_mode)
+
+                process_row_with_driver(row, worker_id, worker_driver)
+            finally:
+                task_queue.task_done()
+
+        if worker_driver is not None:
+            try:
+                worker_driver.quit()
+            except Exception:
+                pass
+
+    def process_row_with_driver(row: Dict[str, str], worker_id: int, worker_driver) -> None:
         nonlocal processed
 
         line_number = int(row["行"])
@@ -55,7 +85,12 @@ def run_judgement(
                 event_queue.put(("worker_log", {"worker": worker_id, "message": f"{row_no}行目: {message}"}))
 
             try:
-                result = search_service_area(postal_code, address, progress_callback=progress_callback)
+                result = search_service_area(
+                    postal_code,
+                    address,
+                    progress_callback=progress_callback,
+                    shared_driver=worker_driver,
+                )
                 judgement = map_result(result if isinstance(result, dict) else {})
                 row["判定結果"] = judgement
                 row["備考"] = extract_note(result if isinstance(result, dict) else {})
@@ -79,20 +114,6 @@ def run_judgement(
 
         event_queue.put(("row", row.copy()))
         event_queue.put(("progress", (current, total)))
-
-    def worker_loop(worker_id: int) -> None:
-        while True:
-            if stop_requested():
-                return
-            try:
-                row = task_queue.get_nowait()
-            except queue.Empty:
-                return
-
-            try:
-                process_row(row, worker_id)
-            finally:
-                task_queue.task_done()
 
     workers: List[threading.Thread] = []
     for worker_id in range(effective_parallel):
