@@ -36,13 +36,17 @@ class DesktopApp:
         self.monitor_browser_var = tk.BooleanVar(value=False)
         self.show_popup_var = tk.BooleanVar(value=True)
         self.parallel_count_var = tk.IntVar(value=2)
-        self.parallel_count_values = (1, 2, 3, 4)
+        self.parallel_count_values = (1, 2, 3, 4, 5, 6, 7, 8)
         self.run_scope_var = tk.StringVar(value="全行")
         self.target_line_var = tk.StringVar(value="対象行: 未選択")
         self.execution_target_line: Optional[int] = None
 
         self.worker_log_texts: List[tk.Text] = []
         self.worker_logs_container: ttk.Frame | None = None
+        self.main_canvas: tk.Canvas | None = None
+        self.main_scrollbar: ttk.Scrollbar | None = None
+        self.main_content: ttk.Frame | None = None
+        self.main_canvas_window_id: int | None = None
         self.update_manager = UpdateManager(root=self.root, log_callback=self._append_log)
 
         self._load_settings_to_ui()
@@ -53,7 +57,26 @@ class DesktopApp:
     def _build_ui(self) -> None:
         self._build_menu()
 
-        top_frame = ttk.Frame(self.root, padding=12)
+        content_host = ttk.Frame(self.root)
+        content_host.pack(fill=tk.BOTH, expand=True)
+
+        self.main_canvas = tk.Canvas(content_host, highlightthickness=0, borderwidth=0)
+        self.main_scrollbar = ttk.Scrollbar(content_host, orient=tk.VERTICAL, command=self.main_canvas.yview)
+        self.main_canvas.configure(yscrollcommand=self.main_scrollbar.set)
+
+        self.main_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.main_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.main_content = ttk.Frame(self.main_canvas)
+        self.main_canvas_window_id = self.main_canvas.create_window((0, 0), window=self.main_content, anchor="nw")
+        self.main_content.bind("<Configure>", self._on_main_content_configure)
+        self.main_canvas.bind("<Configure>", self._on_main_canvas_configure)
+        self.root.bind_all("<MouseWheel>", self._on_main_mousewheel)
+
+        if self.main_content is None:
+            return
+
+        top_frame = ttk.Frame(self.main_content, padding=12)
         top_frame.pack(fill=tk.X)
 
         self.select_button = ttk.Button(top_frame, text="CSVファイルを選択", command=self.load_csv)
@@ -84,7 +107,7 @@ class DesktopApp:
 
         ttk.Label(top_frame, textvariable=self.file_label).pack(side=tk.LEFT, padx=(12, 0))
 
-        setting_frame = ttk.LabelFrame(self.root, text="設定", padding=10)
+        setting_frame = ttk.LabelFrame(self.main_content, text="設定", padding=10)
         setting_frame.pack(fill=tk.X, padx=12, pady=(0, 8))
 
         ttk.Checkbutton(setting_frame, text="ブラウザ表示で監視する", variable=self.monitor_browser_var).pack(side=tk.LEFT)
@@ -104,13 +127,13 @@ class DesktopApp:
         ttk.Button(setting_frame, text="設定保存", command=self.save_settings).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Button(setting_frame, text="更新チェック", command=self.check_for_updates_manual).pack(side=tk.LEFT, padx=(8, 0))
 
-        info_frame = ttk.Frame(self.root, padding=(12, 0, 12, 8))
+        info_frame = ttk.Frame(self.main_content, padding=(12, 0, 12, 8))
         info_frame.pack(fill=tk.X)
         ttk.Label(info_frame, textvariable=self.total_label).pack(side=tk.LEFT)
         ttk.Label(info_frame, textvariable=self.result_label).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Label(info_frame, textvariable=self.progress_label).pack(side=tk.LEFT, padx=(16, 0))
 
-        table_frame = ttk.Frame(self.root)
+        table_frame = ttk.Frame(self.main_content)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
@@ -140,7 +163,7 @@ class DesktopApp:
         self.tree.bind("<Double-1>", self._on_tree_double_click)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_selection)
 
-        note_frame = ttk.LabelFrame(self.root, text="備考詳細", padding=8)
+        note_frame = ttk.LabelFrame(self.main_content, text="備考詳細", padding=8)
         note_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 8))
 
         self.note_text = tk.Text(note_frame, height=4, wrap=tk.WORD)
@@ -150,17 +173,18 @@ class DesktopApp:
         note_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.note_text.configure(state=tk.DISABLED)
 
-        global_log_frame = ttk.LabelFrame(self.root, text="全体ログ", padding=8)
+        global_log_frame = ttk.LabelFrame(self.main_content, text="全体ログ", padding=8)
         global_log_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 8))
 
         self.log_text = tk.Text(global_log_frame, height=6, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
         self.log_text.configure(state=tk.DISABLED)
 
-        worker_log_frame = ttk.LabelFrame(self.root, text="ワーカー別ログ（提供判定実行中）", padding=8)
+        worker_log_frame = ttk.LabelFrame(self.main_content, text="ワーカー別ログ（提供判定実行中）", padding=8)
         worker_log_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 12))
         self.worker_logs_container = ttk.Frame(worker_log_frame)
         self.worker_logs_container.pack(fill=tk.BOTH, expand=True)
+
         self._rebuild_worker_log_panels()
 
     def _build_menu(self) -> None:
@@ -473,6 +497,24 @@ class DesktopApp:
             return 2
         return int(value)
 
+    def _on_main_content_configure(self, _event: tk.Event) -> None:
+        if self.main_canvas is None:
+            return
+        self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+
+    def _on_main_canvas_configure(self, event: tk.Event) -> None:
+        if self.main_canvas is None or self.main_canvas_window_id is None:
+            return
+        self.main_canvas.itemconfigure(self.main_canvas_window_id, width=event.width)
+
+    def _on_main_mousewheel(self, event: tk.Event) -> None:
+        if self.main_canvas is None:
+            return
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta == 0:
+            return
+        self.main_canvas.yview_scroll(int(-delta / 120), "units")
+
     def _rebuild_worker_log_panels(self, clear_existing: bool = False) -> None:
         if self.worker_logs_container is None:
             return
@@ -514,6 +556,9 @@ class DesktopApp:
                 text.configure(state=tk.DISABLED)
 
             self.worker_log_texts.append(text)
+
+        if self.main_canvas is not None:
+            self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
 
     def _append_log(self, message: str) -> None:
         self.log_text.configure(state=tk.NORMAL)
