@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Dict, List, Optional, Set, Tuple
@@ -31,7 +32,9 @@ class DesktopApp:
         self.current_stop_event: threading.Event | None = None
         self.running = False
         self.judgement_started_at: float | None = None
+        self.judgement_started_datetime: datetime | None = None
         self.elapsed_timer_job: str | None = None
+        self.start_time_label = tk.StringVar(value="開始時刻: -")
         self.elapsed_label = tk.StringVar(value="実行時間: -")
 
         self.total_label = tk.StringVar(value="総行数: 0")
@@ -139,6 +142,7 @@ class DesktopApp:
         ttk.Label(info_frame, textvariable=self.total_label).pack(side=tk.LEFT)
         ttk.Label(info_frame, textvariable=self.result_label).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Label(info_frame, textvariable=self.progress_label).pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Label(info_frame, textvariable=self.start_time_label).pack(side=tk.LEFT, padx=(16, 0))
         ttk.Label(info_frame, textvariable=self.elapsed_label).pack(side=tk.LEFT, padx=(16, 0))
 
         table_frame = ttk.Frame(self.main_content)
@@ -477,6 +481,8 @@ class DesktopApp:
         self._set_running_ui_state(True)
         self.result_label.set("提供判定を実行中...")
         self.progress_label.set(f"進捗: 0/{total_targets}")
+        self.judgement_started_datetime = datetime.now()
+        self.start_time_label.set(f"開始時刻: {self._format_datetime(self.judgement_started_datetime)}")
         self.elapsed_label.set("実行時間: 00:00")
         self._append_log("提供判定を開始しました")
         self._rebuild_worker_log_panels(clear_existing=True)
@@ -551,26 +557,53 @@ class DesktopApp:
 
         failed_rows = payload.get("failed_rows", [])
         cancelled = bool(payload.get("cancelled", False))
+        start_datetime_text = self._format_datetime(self.judgement_started_datetime)
+        end_datetime = datetime.now()
+        end_datetime_text = self._format_datetime(end_datetime)
         elapsed_text = self._get_elapsed_time_text()
         self._stop_elapsed_timer()
         self.elapsed_label.set(f"実行時間: {elapsed_text}")
         self.judgement_started_at = None
+        self.judgement_started_datetime = None
 
         if cancelled:
             self.result_label.set("提供判定を停止しました")
             self._append_log("提供判定を停止しました")
-            messagebox.showinfo("停止", f"提供判定を停止しました。\n実行時間: {elapsed_text}")
+            messagebox.showinfo(
+                "停止",
+                "提供判定を停止しました。\n"
+                f"開始時刻: {start_datetime_text}\n"
+                f"終了時刻: {end_datetime_text}\n"
+                f"実行時間: {elapsed_text}",
+            )
             return
 
         if failed_rows:
             self.result_label.set("提供判定完了（失敗あり）")
             lines = ", ".join(map(str, failed_rows))
             self._append_log(f"提供判定完了: 失敗行 {lines}")
-            messagebox.showwarning("失敗行", f"以下の行が失敗しました: {lines}\n実行時間: {elapsed_text}")
+            messagebox.showwarning(
+                "失敗行",
+                f"以下の行が失敗しました: {lines}\n"
+                f"開始時刻: {start_datetime_text}\n"
+                f"終了時刻: {end_datetime_text}\n"
+                f"実行時間: {elapsed_text}",
+            )
         else:
             self.result_label.set("提供判定完了")
             self._append_log("提供判定が完了しました")
-            messagebox.showinfo("完了", f"提供判定が完了しました。\n実行時間: {elapsed_text}")
+            messagebox.showinfo(
+                "完了",
+                "提供判定が完了しました。\n"
+                f"開始時刻: {start_datetime_text}\n"
+                f"終了時刻: {end_datetime_text}\n"
+                f"実行時間: {elapsed_text}",
+            )
+
+    def _format_datetime(self, value: datetime | None) -> str:
+        if value is None:
+            return "-"
+        return value.strftime("%Y-%m-%d %H:%M:%S")
 
     def _get_elapsed_time_text(self) -> str:
         if self.judgement_started_at is None:
@@ -603,6 +636,7 @@ class DesktopApp:
 
         self.elapsed_label.set(f"実行時間: {self._get_elapsed_time_text()}")
         self.elapsed_timer_job = self.root.after(500, self._update_elapsed_timer)
+
     def _set_running_ui_state(self, is_running: bool) -> None:
         self.select_button.configure(state=tk.DISABLED if is_running else tk.NORMAL)
         self.start_button.configure(state=tk.DISABLED if is_running else tk.NORMAL)
