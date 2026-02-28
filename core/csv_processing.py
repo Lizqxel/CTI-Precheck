@@ -25,11 +25,32 @@ def normalize_zipcode(value: str) -> str:
     return cleaned
 
 
-def read_csv(file_path: Path) -> List[List[str]]:
+def _is_blank_row(row: List[str]) -> bool:
+    if not row:
+        return True
+
+    for cell in row:
+        text = "" if cell is None else str(cell)
+        if text.replace("　", " ").strip():
+            return False
+
+    return True
+
+
+def read_csv(file_path: Path) -> Tuple[List[List[str]], int]:
     file_bytes = file_path.read_bytes()
     text = decode_csv_bytes(file_bytes)
     reader = csv.reader(text.splitlines())
-    return [row for row in reader]
+    filtered_rows: List[List[str]] = []
+    removed_blank_rows = 0
+
+    for row in reader:
+        if _is_blank_row(row):
+            removed_blank_rows += 1
+            continue
+        filtered_rows.append(row)
+
+    return filtered_rows, removed_blank_rows
 
 
 def validate_rows(rows: List[List[str]]) -> Tuple[List[Dict[str, str]], List[int]]:

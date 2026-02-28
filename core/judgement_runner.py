@@ -1,8 +1,11 @@
 import queue
 import threading
+import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from services.area_search import CancellationError
+from services.area_search import close_active_drivers
+from services.area_search import RetryableWebDriverError
 from services.area_search import search_service_area
 
 from core.cancellation import clear_cancel_flags
@@ -10,6 +13,30 @@ from core.result_mapping import extract_note, map_result
 
 
 EventQueue = queue.Queue[Tuple[str, object]]
+
+
+def _is_retryable_driver_failure(note: str) -> bool:
+    message = (note or "").lower()
+    keywords = (
+        "stacktrace",
+        "message:",
+        "検索結果確認ボタンを検出できず",
+        "画面状態から処理を再開できませんでした",
+        "webdriverセッションが切断されました",
+        "max retries exceeded",
+        "failed to establish a new connection",
+        "winerror 10061",
+        "remote end closed connection",
+        "localhost",
+        "chrome not reachable",
+        "invalid session id",
+        "session not created",
+        "disconnected",
+        "target window already closed",
+        "no such window",
+        "webview not found",
+    )
+    return any(keyword in message for keyword in keywords)
 
 
 def run_judgement(
@@ -22,6 +49,8 @@ def run_judgement(
     failed_rows: List[int] = []
     failed_rows_lock = threading.Lock()
     processed_lock = threading.Lock()
+    retryable_failure_streak_lock = threading.Lock()
+    retryable_failure_streak = 0
     processed = 0
     total = len(rows_data) if target_lines is None else len(target_lines)
 
@@ -38,6 +67,7 @@ def run_judgement(
 
     def process_row(row: Dict[str, str], worker_id: int) -> None:
         nonlocal processed
+        nonlocal retryable_failure_streak
 
         line_number = int(row["行"])
 
@@ -55,10 +85,68 @@ def run_judgement(
                 event_queue.put(("worker_log", {"worker": worker_id, "message": f"{row_no}行目: {message}"}))
 
             try:
-                result = search_service_area(postal_code, address, progress_callback=progress_callback)
-                judgement = map_result(result if isinstance(result, dict) else {})
+                retry_limit = 3
+                result: Dict[str, object] | object = {}
+                judgement = "失敗"
+                note = ""
+
+                for attempt in range(1, retry_limit + 1):
+                    try:
+                        result = search_service_area(postal_code, address, progress_callback=progress_callback)
+                        mapped_result = result if isinstance(result, dict) else {}
+                        judgement = map_result(mapped_result)
+                        note = extract_note(mapped_result)
+                    except RetryableWebDriverError as retryable_exc:
+                        judgement = "失敗"
+                        note = "ブラウザ通信エラー（自動再試行対象）"
+                        if attempt < retry_limit:
+                            event_queue.put((
+                                "worker_log",
+                                {
+                                    "worker": worker_id,
+                                    "message": f"{line_number}行目: セッション断を検出したため高速リトライします（{attempt}/{retry_limit}）",
+                                },
+                            ))
+                            if effective_parallel == 1:
+                                close_active_drivers()
+                            time.sleep(0.25 * attempt)
+                            continue
+                        note = "ブラウザ通信エラーにより判定できませんでした（再試行後も失敗）"
+                        break
+
+                    if judgement != "失敗" or not _is_retryable_driver_failure(note):
+                        break
+
+                    with retryable_failure_streak_lock:
+                        current_streak = retryable_failure_streak
+
+                    if attempt < retry_limit and current_streak < 3:
+                        event_queue.put((
+                            "worker_log",
+                            {
+                                "worker": worker_id,
+                                "message": f"{line_number}行目: WebDriverエラーを検出したため再試行します（{attempt}/{retry_limit}）",
+                            },
+                        ))
+                        if effective_parallel == 1:
+                            close_active_drivers()
+                        time.sleep(0.3 * attempt)
+                        continue
+
+                    break
+
                 row["判定結果"] = judgement
-                row["備考"] = extract_note(result if isinstance(result, dict) else {})
+                row["備考"] = note
+
+                if judgement == "失敗" and _is_retryable_driver_failure(note):
+                    with retryable_failure_streak_lock:
+                        retryable_failure_streak += 1
+                        if effective_parallel == 1 and retryable_failure_streak % 10 == 0:
+                            close_active_drivers()
+                else:
+                    with retryable_failure_streak_lock:
+                        retryable_failure_streak = 0
+
                 if judgement == "失敗":
                     with failed_rows_lock:
                         failed_rows.append(line_number)
