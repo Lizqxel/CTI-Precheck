@@ -43,7 +43,7 @@ class DesktopApp:
         self.progress_label = tk.StringVar(value="進捗: -")
         self.monitor_browser_var = tk.BooleanVar(value=False)
         self.show_popup_var = tk.BooleanVar(value=True)
-        self.parallel_count_var = tk.IntVar(value=2)
+        self.parallel_count_var = tk.IntVar(value=1)
         self.parallel_count_values = (1, 2, 3, 4, 5, 6, 7, 8)
         self.run_scope_var = tk.StringVar(value="全行")
         self.target_line_var = tk.StringVar(value="対象行: 未選択")
@@ -282,7 +282,7 @@ class DesktopApp:
         self.file_label.set(str(file_path))
 
         try:
-            rows = read_csv(file_path)
+            rows, removed_blank_rows = read_csv(file_path)
         except Exception as exc:
             self.result_label.set("読み込み失敗")
             messagebox.showerror("エラー", f"CSVの読み込みに失敗しました\n{exc}")
@@ -304,9 +304,15 @@ class DesktopApp:
         self.run_scope_var.set("全行")
 
         self.total_label.set(f"総行数: {len(self.rows_data)}")
-        self.result_label.set("CSV読み込み完了")
+        if removed_blank_rows > 0:
+            self.result_label.set(f"CSV読み込み完了（空行 {removed_blank_rows} 行を除外）")
+        else:
+            self.result_label.set("CSV読み込み完了")
         self.progress_label.set("進捗: -")
-        self._append_log(f"CSVを読み込みました: {file_path.name}")
+        if removed_blank_rows > 0:
+            self._append_log(f"CSVを読み込みました: {file_path.name}（空行 {removed_blank_rows} 行を除外）")
+        else:
+            self._append_log(f"CSVを読み込みました: {file_path.name}")
         if invalid_line_numbers:
             messagebox.showwarning(
                 "入力不備のある行",
@@ -327,7 +333,7 @@ class DesktopApp:
             return
 
         try:
-            rows = read_csv(autosave_path)
+            rows, removed_blank_rows = read_csv(autosave_path)
         except Exception as exc:
             self._append_log(f"自動保存CSVの読み込みに失敗しました: {exc}")
             return
@@ -356,9 +362,15 @@ class DesktopApp:
 
         self.file_label.set(f"自動復元: {autosave_path.name}")
         self.total_label.set(f"総行数: {len(self.rows_data)}")
-        self.result_label.set("前回の進捗を自動読み込みしました")
+        if removed_blank_rows > 0:
+            self.result_label.set(f"前回の進捗を自動読み込みしました（空行 {removed_blank_rows} 行を除外）")
+        else:
+            self.result_label.set("前回の進捗を自動読み込みしました")
         self.progress_label.set("進捗: -")
-        self._append_log(f"前回の進捗を自動読み込みしました: {autosave_path}")
+        if removed_blank_rows > 0:
+            self._append_log(f"前回の進捗を自動読み込みしました: {autosave_path}（空行 {removed_blank_rows} 行を除外）")
+        else:
+            self._append_log(f"前回の進捗を自動読み込みしました: {autosave_path}")
 
         if invalid_line_numbers:
             self._append_log(f"自動復元データに入力不備の行があります: {', '.join(map(str, invalid_line_numbers))}")
